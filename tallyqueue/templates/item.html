@@ -1,9 +1,18 @@
 {% extends "base.html" %}
+{% from "_macros.html" import voucher, prep_form, book_form, skip_form, reopen_form %}
 {% block title %}{{ item.facts.counterparty or item.receipt.filename }}{% endblock %}
 {% block main %}
 <p class="back"><a href="/items">← All items</a></p>
 <h1>{{ item.facts.counterparty or item.receipt.filename }}
   <span class="status {{ item.status }}">{{ item.status }}</span></h1>
+<p class="keyfacts">
+  {{ item.facts.date or 'No date' }}
+  {% if item.facts.amount %} · <strong>{{ item.facts.amount|money }} {{ item.facts.currency or '' }}</strong>{% endif %}
+  {% if item.facts.amount_sek %} = {{ item.facts.amount_sek|money }} SEK{% endif %}
+  {% if item.facts.vat_amount %} · VAT {{ item.facts.vat_amount|money }}{% endif %}
+  {% if item.facts.invoice_number %} · invoice {{ item.facts.invoice_number }}{% endif %}
+  {% if item.facts.description %} · {{ item.facts.description }}{% endif %}
+</p>
 <p class="sub">Item {{ item.id[:12] }} · added {{ item.created[:10] }}{% if item.source %} · from: {{ item.source }}{% endif %}</p>
 
 {% if warnings %}
@@ -30,6 +39,84 @@
 </section>
 
 <div class="forms">
+<section class="panel" id="status">
+  <h2>Status</h2>
+  {% if item.status == 'booked' %}
+  <p>Booked {{ item.booking.date }} as voucher <strong>{{ item.booking.voucher }}</strong>, with the receipt
+  attached in the bookkeeping service.</p>
+  {% elif item.status == 'skipped' %}
+  <p>Skipped: {{ item.skip_reason }}</p>
+  {% elif item.status == 'prepped' %}
+  <p>Prepped: checked and ready to book.</p>
+  {% endif %}
+  {% if item.status == 'new' %}{{ prep_form(item, session.csrf, prep_problems) }}{% endif %}
+  {% if item.status in ('new', 'prepped') %}
+  <div class="choices">
+    {{ book_form(item, session.csrf) }}
+    {{ skip_form(item, session.csrf) }}
+  </div>
+  {% endif %}
+  {% if item.status != 'new' %}{{ reopen_form(item, session.csrf) }}{% endif %}
+</section>
+
+<section class="panel">
+  <h2>Kontering <span class="sub">proposal, in SEK</span></h2>
+  {% set saved = item.facts %}
+  {% if saved.currency and saved.currency != 'SEK' %}
+  <p class="sub">
+    {% if not saved.amount_sek %}
+    <span class="warn">The amount is in {{ saved.currency }} and its total in SEK is not given yet.</span>
+    {% elif saved.exchange_rate %}
+    {{ saved.amount|money }} {{ saved.currency }} at {{ saved.exchange_rate }} is <strong>{{ saved.amount_sek|money }} SEK</strong>{% if saved.exchange_rate_source %} (rate from: {{ saved.exchange_rate_source }}){% endif %}.
+    {% else %}
+    {{ saved.amount|money }} {{ saved.currency }} is <strong>{{ saved.amount_sek|money }} SEK</strong>{% if saved.exchange_rate_source %} (from: {{ saved.exchange_rate_source }}){% endif %}{% if sek.implied %}, about {{ sek.implied }} for one {{ saved.currency }}{% endif %}.
+    {% endif %}
+  </p>
+  {% endif %}
+  {% if item.kontering and item.kontering.lines %}
+  <div class="scroll">{{ voucher(item.kontering, account_names, totals) }}</div>
+  {% else %}
+  <p class="sub">No lines yet.</p>
+  {% endif %}
+  {% if item.kontering and item.kontering.vat_treatment %}<p><span class="sub">VAT:</span> {{ item.kontering.vat_treatment }}</p>{% endif %}
+  {% if item.kontering and item.kontering.note %}<p class="note"><span class="sub">Note:</span> {{ item.kontering.note }}</p>{% endif %}
+  <details class="edit"{% if edit_kontering %} open{% endif %}>
+    <summary>Edit the kontering</summary>
+    <form method="post" action="/items/{{ item.id }}/kontering">
+      <input type="hidden" name="csrf" value="{{ session.csrf }}">
+      <div class="scroll">
+      <table class="lines">
+        <thead>
+          <tr><th scope="col">Account</th><th scope="col" class="num">Debit</th><th scope="col" class="num">Credit</th><th scope="col">Text</th></tr>
+        </thead>
+        <tbody>
+          {% for line in lines %}
+          <tr>
+            <td><input name="account_{{ loop.index0 }}" value="{{ line.account or '' }}" inputmode="numeric" maxlength="6" size="6" list="accounts" aria-label="Account, line {{ loop.index }}" autocomplete="off"></td>
+            <td><input name="debit_{{ loop.index0 }}" value="{{ line.debit or '' }}" inputmode="decimal" class="num" size="10" aria-label="Debit, line {{ loop.index }}" autocomplete="off"></td>
+            <td><input name="credit_{{ loop.index0 }}" value="{{ line.credit or '' }}" inputmode="decimal" class="num" size="10" aria-label="Credit, line {{ loop.index }}" autocomplete="off"></td>
+            <td><input name="text_{{ loop.index0 }}" value="{{ line.text or '' }}" aria-label="Text, line {{ loop.index }}" autocomplete="off"></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      <datalist id="accounts">
+        {% for account in accounts %}<option value="{{ account.account }}">{{ account.account }} {{ account.name }}</option>{% endfor %}
+      </datalist>
+      <div class="grid">
+        <label for="k-vat">VAT treatment</label>
+        <input id="k-vat" name="vat_treatment" value="{{ vat_treatment }}" maxlength="200" autocomplete="off">
+        <label for="k-note">Note on the proposal</label>
+        <textarea id="k-note" name="note" rows="2" maxlength="1000">{{ kontering_note }}</textarea>
+        <div class="actions"><button>Save kontering</button></div>
+      </div>
+    </form>
+    <p class="hint">Amounts in SEK. Empty rows are ignored; save to get more rows. {% if not accounts %}You have not
+    added your <a href="/accounts">list of accounts</a>, so account numbers are not checked or named.{% endif %}</p>
+  </details>
+</section>
+
 <section class="panel">
   <h2>Facts</h2>
   <form method="post" action="/items/{{ item.id }}/facts" class="grid">
@@ -43,107 +130,37 @@
     </select>
     {% elif name in ('date', 'due_date', 'payment_date') %}
     <input id="f-{{ name }}" name="{{ name }}" type="date" value="{{ facts[name] or '' }}">
-    {% elif name in ('amount', 'vat_amount', 'amount_sek') %}
+    {% elif name in ('amount', 'vat_amount') %}
     <input id="f-{{ name }}" name="{{ name }}" inputmode="decimal" class="num" value="{{ facts[name] or '' }}" autocomplete="off">
     {% elif name == 'currency' %}
     <input id="f-currency" name="currency" maxlength="3" size="4" class="short" value="{{ facts.currency or '' }}" placeholder="SEK" autocomplete="off">
     {% else %}
     <input id="f-{{ name }}" name="{{ name }}" value="{{ facts[name] or '' }}" autocomplete="off">
     {% endif %}
+    {% if name == 'vat_amount' and sek.shown %}
+    <p class="hint wide">The books are in SEK. For another currency, give the rate, or the total in SEK
+    as the receipt or the card statement shows it. If neither has it, use Riksbanken's rate for the date.</p>
+    <label for="f-exchange_rate">Exchange rate <span class="sub">SEK for 1 {{ facts.currency or 'unit' }}</span></label>
+    <div>
+      <input id="f-exchange_rate" name="exchange_rate" inputmode="decimal" class="num" value="{{ facts.exchange_rate or '' }}" placeholder="11.4235" autocomplete="off">
+      {% if sek.worked_out %}<div class="sub">Gives {{ sek.worked_out|money }} SEK.</div>{% endif %}
+    </div>
+    <label for="f-amount_sek">or the total in SEK <span class="sub">as it was drawn</span></label>
+    <div>
+      <input id="f-amount_sek" name="amount_sek" inputmode="decimal" class="num" value="{{ sek.field }}" autocomplete="off">
+      {% if sek.implied %}<div class="sub">About {{ sek.implied }} for one {{ facts.currency }}.</div>{% endif %}
+    </div>
+    <label for="f-exchange_rate_source">Rate or total from</label>
+    <input id="f-exchange_rate_source" name="exchange_rate_source" list="rate-sources" maxlength="100" value="{{ facts.exchange_rate_source or '' }}" placeholder="card statement" autocomplete="off">
+    {% endif %}
     {% endfor %}
     <div class="actions"><button>Save facts</button></div>
   </form>
-</section>
-
-<section class="panel">
-  <h2>Kontering <span class="sub">proposal, in SEK</span></h2>
-  <form method="post" action="/items/{{ item.id }}/kontering">
-    <input type="hidden" name="csrf" value="{{ session.csrf }}">
-    <div class="scroll">
-    <table class="lines">
-      <thead>
-        <tr><th scope="col">Account</th><th scope="col" class="num">Debit</th><th scope="col" class="num">Credit</th><th scope="col">Text</th></tr>
-      </thead>
-      <tbody>
-        {% for line in lines %}
-        <tr>
-          <td><input name="account_{{ loop.index0 }}" value="{{ line.account or '' }}" inputmode="numeric" maxlength="6" size="6" list="accounts" aria-label="Account, line {{ loop.index }}" autocomplete="off">
-            {% if line.account and account_names.get(line.account) %}<div class="sub">{{ account_names[line.account] }}</div>{% endif %}</td>
-          <td><input name="debit_{{ loop.index0 }}" value="{{ line.debit or '' }}" inputmode="decimal" class="num" size="10" aria-label="Debit, line {{ loop.index }}" autocomplete="off"></td>
-          <td><input name="credit_{{ loop.index0 }}" value="{{ line.credit or '' }}" inputmode="decimal" class="num" size="10" aria-label="Credit, line {{ loop.index }}" autocomplete="off"></td>
-          <td><input name="text_{{ loop.index0 }}" value="{{ line.text or '' }}" aria-label="Text, line {{ loop.index }}" autocomplete="off"></td>
-        </tr>
-        {% endfor %}
-      </tbody>
-      <tfoot>
-        <tr class="{{ 'balanced' if totals.balanced else 'unbalanced' }}">
-          <th scope="row">Saved total</th>
-          <td class="num">{{ totals.debit }}</td>
-          <td class="num">{{ totals.credit }}</td>
-          <td>{{ 'Balances' if totals.balanced else 'Does not balance' }}</td>
-        </tr>
-      </tfoot>
-    </table>
-    </div>
-    <datalist id="accounts">
-      {% for account in accounts %}<option value="{{ account.account }}">{{ account.account }} {{ account.name }}</option>{% endfor %}
-    </datalist>
-    <div class="grid">
-      <label for="k-vat">VAT treatment</label>
-      <input id="k-vat" name="vat_treatment" value="{{ vat_treatment }}" maxlength="200" autocomplete="off">
-      <label for="k-note">Note on the proposal</label>
-      <textarea id="k-note" name="note" rows="2" maxlength="1000">{{ kontering_note }}</textarea>
-      <div class="actions"><button>Save kontering</button></div>
-    </div>
-  </form>
-  <p class="hint">Empty rows are ignored; save to get more rows. {% if not accounts %}You have not
-  added your <a href="/accounts">list of accounts</a>, so account numbers are not checked.{% endif %}</p>
-</section>
-
-<section class="panel">
-  <h2>Status</h2>
-  {% if item.status == 'booked' %}
-  <p>Booked {{ item.booking.date }} as voucher <strong>{{ item.booking.voucher }}</strong>, with the receipt
-  attached in the bookkeeping service.</p>
-  {% elif item.status == 'skipped' %}
-  <p>Skipped: {{ item.skip_reason }}</p>
-  {% endif %}
-
-  {% if item.status == 'new' %}
-  <form method="post" action="/items/{{ item.id }}/status" class="row">
-    <input type="hidden" name="csrf" value="{{ session.csrf }}">
-    <input type="hidden" name="to" value="prepped">
-    <button{% if prep_problems %} disabled{% endif %}>Mark as prepped</button>
-    <span class="hint">{% if prep_problems %}{{ prep_problems|join('. ') }}.{% else %}Checked and ready to book.{% endif %}</span>
-  </form>
-  {% endif %}
-
-  {% if item.status in ('new', 'prepped') %}
-  <form method="post" action="/items/{{ item.id }}/status" class="stack boxed">
-    <input type="hidden" name="csrf" value="{{ session.csrf }}">
-    <input type="hidden" name="to" value="booked">
-    <label for="voucher">Voucher number in your bookkeeping service (verifikationsnummer)</label>
-    <input id="voucher" name="voucher" maxlength="50" class="short" value="{{ (item.booking.voucher if item.booking else '') or '' }}" placeholder="A 12" autocomplete="off">
-    <label class="check"><input type="checkbox" name="receipt_attached"> The receipt is attached to that voucher there</label>
-    <div><button>Mark as booked</button></div>
-  </form>
-  <form method="post" action="/items/{{ item.id }}/status" class="stack boxed">
-    <input type="hidden" name="csrf" value="{{ session.csrf }}">
-    <input type="hidden" name="to" value="skipped">
-    <label for="skip_reason">Why it should not be booked</label>
-    <input id="skip_reason" name="skip_reason" maxlength="300" value="{{ item.skip_reason or '' }}" placeholder="Private purchase" autocomplete="off">
-    <div><button class="quiet">Skip</button></div>
-  </form>
-  {% endif %}
-
-  {% if item.status != 'new' %}
-  <form method="post" action="/items/{{ item.id }}/status" class="row">
-    <input type="hidden" name="csrf" value="{{ session.csrf }}">
-    <input type="hidden" name="to" value="new">
-    <button class="quiet">Back to new</button>
-    <span class="hint">{% if item.status == 'prepped' %}To save unfinished changes.{% else %}Reopens the item. Nothing is removed.{% endif %}</span>
-  </form>
-  {% endif %}
+  <datalist id="rate-sources">
+    <option value="receipt"></option>
+    <option value="card statement"></option>
+    <option value="Riksbanken {{ facts.payment_date or facts.date or '' }}"></option>
+  </datalist>
 </section>
 
 <section class="panel">

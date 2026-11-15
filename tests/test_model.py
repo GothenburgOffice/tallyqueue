@@ -149,10 +149,95 @@ def test_warnings_point_at_things_worth_a_second_look():
     accounts = [{'account': '1930', 'name': 'Företagskonto'}]
     found = model.warnings(this, accounts, [this, twin, other])
     assert any('does not balance' in w for w in found)
-    assert any('amount_sek is empty' in w for w in found)
     assert any('Not in your list of accounts: 6540' in w for w in found)
     assert any('bbbbbbbbbbbb' in w and 'cccc' not in w for w in found)
     assert model.warnings(item(), [], []) == []
+
+
+# ---------------------------------------------------------------- another currency than SEK
+@pytest.mark.parametrize(
+    ('given', 'expected'),
+    [
+        ('11.4235', '11.4235'),
+        ('11,4235', '11.4235'),
+        ('0,0912', '0.0912'),
+        ('10', '10'),
+        ('11.50', '11.5'),
+        ('', None),
+        (None, None),
+    ],
+)
+def test_an_exchange_rate_is_text_for_one_unit_of_the_currency(given, expected):
+    assert model.rate(given) == expected
+
+
+@pytest.mark.parametrize('given', ['0', '-11.4', 'abc', 11.4235, 11, '0.123456789', '100000', 'NaN'])
+def test_an_exchange_rate_that_is_not_one_is_refused(given):
+    with pytest.raises(Invalid):
+        model.rate(given)
+
+
+EUR = {'amount': '20.00', 'currency': 'EUR'}
+
+
+def settle(before, **change):
+    """The facts after a change, the way the store applies one."""
+    cleaned = model.clean_facts(change)
+    was = dict.fromkeys(model.FACT_FIELDS) | before
+    return model.settle_sek(was, was | cleaned, cleaned)
+
+
+def test_a_rate_gives_the_total_in_sek_rounded_to_ore():
+    facts = settle(EUR, exchange_rate='11,4235', exchange_rate_source='Riksbanken 2026-10-19')
+    assert (facts['exchange_rate'], facts['amount_sek']) == ('11.4235', '228.47')
+    # worked out again when the amount changes; half an öre rounds up (342.705)
+    assert settle(facts, amount='30.00')['amount_sek'] == '342.71'
+    assert settle(facts, amount='-20.00')['amount_sek'] == '-228.47'  # a credit note keeps its sign
+    assert settle(facts, description='Licence')['amount_sek'] == '228.47'
+    # when the rate goes, so does what was worked out from it, and the note of its source
+    cleared = settle(facts, exchange_rate='')
+    assert [cleared[name] for name in model.SEK_SIDE] == [None, None, None]
+    # a rate with no amount yet waits for it
+    waiting = settle({'currency': 'EUR'}, exchange_rate='11.4235')
+    assert waiting['amount_sek'] is None and settle(waiting, amount='20')['amount_sek'] == '228.47'
+
+
+def test_a_total_in_sek_given_as_it_is_replaces_the_rate():
+    with_rate = settle(EUR, exchange_rate='11.4235', exchange_rate_source='Riksbanken 2026-10-19')
+    facts = settle(with_rate, amount_sek='231,90', exchange_rate_source='card statement')
+    assert (facts['exchange_rate'], facts['amount_sek']) == (None, '231.90')
+    assert facts['exchange_rate_source'] == 'card statement'
+    assert model.implied_rate(facts) == '11.5950' and model.implied_rate(with_rate) is None
+    # a rate given later replaces the total again
+    assert settle(facts, exchange_rate='11.5')['amount_sek'] == '230.00'
+    # both at once are taken only when they agree to the öre
+    assert settle(EUR, exchange_rate='11.4235', amount_sek='228.47')['exchange_rate'] == '11.4235'
+    with pytest.raises(Invalid, match='Give one of the two'):
+        settle(EUR, exchange_rate='11.4235', amount_sek='231.90')
+    with pytest.raises(Invalid, match='there is no amount'):
+        settle({'currency': 'EUR'}, exchange_rate='11.4235', amount_sek='231.90')
+
+
+def test_an_amount_in_sek_has_no_sek_side_and_a_rate_belongs_to_its_currency():
+    with pytest.raises(Invalid, match='already in SEK'):
+        settle({'amount': '100.00', 'currency': 'SEK'}, exchange_rate='11.5')
+    with pytest.raises(Invalid, match='already in SEK'):
+        settle({'amount': '100.00', 'currency': 'SEK'}, amount_sek='100.00')
+    with_rate = settle(EUR, exchange_rate='11.4235', exchange_rate_source='receipt')
+    assert [settle(with_rate, currency='SEK')[name] for name in model.SEK_SIDE] == [None, None, None]
+    assert [settle(with_rate, currency='USD')[name] for name in model.SEK_SIDE] == [None, None, None]
+    assert settle(with_rate, currency='USD', exchange_rate='10.5')['amount_sek'] == '210.00'
+    # what the statement says was drawn stays when the currency is corrected
+    drawn = settle(EUR, amount_sek='231.90', exchange_rate_source='card statement')
+    assert settle(drawn, currency='USD')['amount_sek'] == '231.90'
+
+
+def test_prepped_needs_the_total_in_sek_for_another_currency():
+    balanced = model.clean_kontering(kontering(('6540', '228.47', None), ('1930', None, '228.47')))
+    facts = {'date': '2026-10-19', 'amount': '20.00', 'currency': 'EUR'}
+    problems = model.prep_problems(item(facts=facts, kontering=balanced))
+    assert len(problems) == 1 and 'total in SEK is missing' in problems[0] and 'EUR' in problems[0]
+    assert model.prep_problems(item(facts=facts | {'amount_sek': '228.47'}, kontering=balanced)) == []
 
 
 def test_accounts_are_parsed_from_plain_lines_and_sie_lines():

@@ -88,6 +88,9 @@ or a pull request, and report only checks that actually ran.
   `list_accounts`), `POST /upload`, `/health`, and `build_app()`, which wraps the app with the
   host check, the token check on `/mcp` and the default response headers.
 - `tallyqueue/web.py` with `templates/` and `static/`: the web page. Server-rendered forms.
+  `templates/_macros.html` holds what the list and the item page share: the kontering written
+  out as a voucher, and the status forms. The stylesheet's address carries a checksum of its
+  content, so a change to `app.css` reaches browsers without a version bump.
 
 ## Rules that must not regress
 
@@ -95,11 +98,20 @@ or a pull request, and report only checks that actually ran.
   passes it to the store. Nothing trusts a user name sent by a client.
 - **Status conditions live in `model.status_problems`** and are enforced in
   `store.update_item`, for the MCP tools and the web page alike: prepped needs date, amount,
-  currency and a balanced kontering; booked needs the voucher number and the receipt-attached
-  tick; skipped needs a reason. A prepped or booked item must stay that complete.
+  currency, the total in SEK when the currency is another, and a balanced kontering; booked
+  needs the voucher number and the receipt-attached tick; skipped needs a reason. A prepped or
+  booked item must stay that complete.
 - **Amounts are decimal strings with two decimals**, never floats: in the tool schema, in
   `model.money` and on disk. A JSON number is refused, and so is an amount that would have to
-  be rounded or guessed ("1,250").
+  be rounded or guessed ("1,250"). An exchange rate is text too (`model.rate`).
+- **The SEK side of another currency lives in `model.settle_sek`**, which the store applies to
+  every change of facts. The total in SEK is either worked out from a given `exchange_rate`
+  (the one place an amount is computed: amount × rate, rounded half up to öre) or given as it
+  is in `amount_sek`, and then no rate is kept. A stored rate and a stored total never
+  disagree, and an amount in SEK has neither. No rate is ever looked up or estimated here: it
+  is given, with its source in `exchange_rate_source`.
+- **Every status can be changed by hand in the web page**, in the list and on the item's page,
+  through the same forms (`templates/_macros.html`). The AI client is never the only way.
 - **A duplicate file never overwrites** what is stored.
 - **No JavaScript on the pages.** The page policy is `default-src 'none'` with styles, images
   and frames from this origin only. Templates autoescape; never mark user text as safe.

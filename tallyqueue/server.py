@@ -41,6 +41,11 @@ checks every figure first.
 - The kontering is a proposal for the user to check, in SEK, and it must balance. Use accounts
   from list_accounts when the user has supplied their list. Put what you were unsure about in
   kontering.note. You give no accounting or tax advice.
+- The books are kept in SEK. For a document in another currency, give the total in SEK one of two
+  ways: amount_sek as it is, when the receipt or the card or bank statement shows what was drawn;
+  or exchange_rate (SEK for one unit of the currency), and amount_sek is worked out from it. When
+  neither the receipt nor a statement gives it, use Riksbanken's rate for the date. Always say
+  where the figure comes from in exchange_rate_source. Never estimate a rate.
 - Statuses: new, then prepped (facts and a balanced kontering are in place), then booked (the user
   booked it in their bookkeeping service). Mark an item booked only when the user tells you the
   voucher number and that the receipt is attached there. Use skipped, with a reason, for what
@@ -67,8 +72,21 @@ class Facts(BaseModel):
     )
     currency: str | None = Field(None, description='Three-letter code: SEK, EUR, USD.')
     vat_amount: Amount = Field(None, description='VAT on the document, in the document currency.')
+    exchange_rate: str | None = Field(
+        None,
+        description='Only when the currency is not SEK: SEK for one unit of the currency, as text: '
+        '"11.4235". amount_sek is then worked out from it. Leave out when you give amount_sek.',
+    )
     amount_sek: Amount = Field(
-        None, description='The total in SEK when the currency is not SEK, if it is known (bank statement).'
+        None,
+        description='Only when the currency is not SEK: the total in SEK as the receipt or the card '
+        'statement shows it. Leave out when you give exchange_rate.',
+    )
+    exchange_rate_source: str | None = Field(
+        None,
+        description='Where the rate or the total in SEK comes from: "receipt", "card statement", '
+        '"Riksbanken 2026-10-19".',
+        max_length=100,
     )
     invoice_number: str | None = None
     due_date: str | None = Field(None, description='YYYY-MM-DD.')
@@ -131,6 +149,7 @@ def _row(item: dict) -> dict:
         'counterparty': facts['counterparty'],
         'amount': facts['amount'],
         'currency': facts['currency'],
+        'amount_sek': facts['amount_sek'],
         'vat_amount': facts['vat_amount'],
         'kontering': _lines(item['kontering']),
         'voucher': (item['booking'] or {}).get('voucher'),
@@ -191,9 +210,10 @@ bytes instead and then call update_item with the id from the reply:
   curl -fsS -X POST --data-binary @invoice.pdf -H "X-API-Key: <token>" -H "X-Filename: invoice.pdf" {config.PUBLIC_URL}/upload
 
 facts: only what the document says (date, counterparty, amount, currency, VAT). Leave out what is not
-there; never guess. kontering: a proposal in SEK that balances, for the user to check; use accounts
-from list_accounts when there are any. source: where the document came from, such as the sender,
-date and subject of the mail.""",
+there; never guess. For another currency than SEK, also give exchange_rate or amount_sek, with
+exchange_rate_source (see update_item). kontering: a proposal in SEK that balances, for the user to
+check; use accounts from list_accounts when there are any. source: where the document came from, such
+as the sender, date and subject of the mail.""",
     structured_output=False,
 )
 async def add_item(
@@ -284,9 +304,15 @@ facts: send only the facts to change; an empty string clears one. kontering repl
 every line has an account and either debit or credit, in SEK, and the two sides should balance; an
 empty list of lines clears it.
 
+Another currency than SEK: give facts.exchange_rate (SEK for one unit, e.g. "11.4235"; amount_sek is
+worked out from it), or facts.amount_sek as the card or bank statement shows it. Not both, unless they
+agree to the öre. Say where it comes from in facts.exchange_rate_source ("receipt", "card statement",
+"Riksbanken 2026-10-19"). With no rate on the receipt or a statement, use Riksbanken's rate for the date.
+
 status:
-- prepped: the facts date, amount and currency are in place and the kontering balances with at least
-  two lines. It means "ready for the user to book", not that it is correct: the user checks it.
+- prepped: the facts date, amount and currency are in place, the total in SEK is known when the
+  currency is not SEK, and the kontering balances with at least two lines. It means "ready for the
+  user to book", not that it is correct: the user checks it.
 - booked: the user has booked it in their bookkeeping service. Send voucher (the voucher number there,
   e.g. "A 12") and receipt_attached=true (the receipt is attached to that voucher there). Only do this
   when the user tells you both. Never guess a voucher number.

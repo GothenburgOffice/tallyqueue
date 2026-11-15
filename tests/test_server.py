@@ -55,7 +55,7 @@ from mcp.client.session import ClientSession  # noqa: E402
 from mcp.client.streamable_http import streamable_http_client  # noqa: E402
 from mcp.shared._httpx_utils import create_mcp_http_client  # noqa: E402
 
-from tallyqueue import server, store  # noqa: E402
+from tallyqueue import model, server, store  # noqa: E402
 
 _srv = uvicorn.Server(uvicorn.Config(server.build_app(), host='127.0.0.1', port=PORT, log_level='warning'))
 threading.Thread(target=_srv.run, daemon=True).start()
@@ -627,6 +627,119 @@ def test_the_users_own_accounts(alice, hosting):
     warnings = ok('get_item', {'id': hosting['id']})['warnings']
     assert 'Not in your list of accounts: 6230' in warnings
     assert 'Företagskonto'.encode() in alice.get('/accounts')[2]
+
+
+def test_another_currency_is_booked_in_sek(hosting):
+    data = pdf('Example Software Ltd, invoice 88, 20.00 EUR (made up)')
+    facts = {
+        'date': '2026-10-19',
+        'amount': '20.00',
+        'currency': 'EUR',
+        'counterparty': 'Example Software Ltd',
+    }
+    lines = {'lines': [{'account': '6540', 'debit': '228.47'}, {'account': '1930', 'credit': '228.47'}]}
+    item = ok('add_item', {'file_base64': b64(data), 'facts': facts, 'kontering': lines})['item']
+    ref = item['id']
+    assert any('total in SEK is missing' in problem for problem in item['missing_for_prepped'])
+    assert 'total in SEK is missing' in refused('update_item', {'id': ref, 'status': 'prepped'})
+
+    # a rate gives the total, and the list shows it
+    rate = {'exchange_rate': '11,4235', 'exchange_rate_source': 'Riksbanken 2026-10-19'}
+    item = ok('update_item', {'id': ref, 'facts': rate, 'status': 'prepped'})
+    assert item['status'] == 'prepped'
+    assert (item['facts']['exchange_rate'], item['facts']['amount_sek']) == ('11.4235', '228.47')
+    history = ok('get_item', {'id': ref})['history'][-1]['what']
+    assert history == 'facts: exchange_rate, amount_sek, exchange_rate_source; status: new to prepped'
+    assert next(r for r in ok('list_items')['items'] if r['id'] == ref[:12])['amount_sek'] == '228.47'
+
+    # what the card statement says was drawn replaces it; both at once have to agree
+    drawn = {'amount_sek': '231.90', 'exchange_rate_source': 'card statement'}
+    item = ok('update_item', {'id': ref, 'facts': drawn})
+    assert 'exchange_rate' not in item['facts'] and item['facts']['amount_sek'] == '231.90'
+    both = {'exchange_rate': '11.4235', 'amount_sek': '231.90'}
+    assert 'Give one of the two' in refused('update_item', {'id': ref, 'facts': both})
+    reply, error = call('update_item', {'id': ref, 'facts': {'exchange_rate': 11.4235}})
+    assert reply is None and 'exchange_rate' in error  # a JSON number is refused, as for an amount
+
+    # a prepped item stays complete, and an amount in SEK takes no rate
+    assert 'total in SEK is missing' in refused('update_item', {'id': ref, 'facts': {'amount_sek': ''}})
+    assert 'already in SEK' in refused(
+        'update_item', {'id': hosting['id'], 'facts': {'exchange_rate': '11.5'}}
+    )
+    assert ok('get_item', {'id': ref})['facts']['amount_sek'] == '231.90'
+
+
+def test_the_item_page_takes_a_rate_or_the_total_in_sek(alice, hosting):
+    data = pdf('Example Cloud Inc, receipt 31, 12.00 USD (made up)')
+    assert alice.upload('cloud.pdf', data)[0] == 303
+    path = f'/items/{sha(data)}'
+    form = dict.fromkeys(model.FACT_FIELDS, '') | {'date': '2026-11-05', 'amount': '12.00', 'currency': 'USD'}
+    rate = {'exchange_rate': '10,5', 'exchange_rate_source': 'Riksbanken 2026-11-05'}
+    assert alice.post(f'{path}/facts', form | rate)[0] == 303
+    page = alice.get(path)[2].decode()
+    # The total worked out from the rate is shown beside its field, not in it: what is in the
+    # field counts as given, and would replace the rate on the next save.
+    assert 'Gives 126.00 SEK' in page and 'value="10.5"' in page
+    assert re.search(r'name="amount_sek"[^>]* value=""', page)
+    assert '12.00 USD at 10.5 is <strong>126.00 SEK</strong>' in page
+
+    status, _, body = alice.post(f'{path}/facts', form | rate | {'amount_sek': '127,31'})
+    assert status == 422 and b'Give one of the two' in body and b'value="127,31"' in body
+    drawn = {'amount_sek': '127,31', 'exchange_rate_source': 'card statement'}
+    assert alice.post(f'{path}/facts', form | drawn)[0] == 303
+    page = alice.get(path)[2].decode()
+    assert 'About 10.6092 for one USD' in page and re.search(r'name="amount_sek"[^>]* value="127.31"', page)
+    assert ok('get_item', {'id': sha(data)})['facts']['exchange_rate_source'] == 'card statement'
+
+    # an amount in SEK has no such fields
+    assert 'name="exchange_rate"' not in alice.get(f'/items/{hosting["id"]}')[2].decode()
+    ok('update_item', {'id': sha(data), 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
+def test_the_list_writes_the_kontering_out_and_changes_status(alice, hosting):
+    # Runs after the accounts test, so the accounts have names.
+    here = '/items?status=todo'
+    page = alice.get(here)[2].decode()
+    assert 'Leverantörsskulder' in page and 'D 6230' not in page
+    assert '1\u202f250.00' in page  # amounts are grouped for reading
+    assert f'action="/items/{hosting["id"]}/status"' in page and f'name="back" value="{here}"' in page
+
+    # prepped and then booked straight from the list, coming back to the same tab
+    path = f'/items/{hosting["id"]}/status'
+    status, headers, _ = alice.post(path, {'to': 'prepped', 'back': here})
+    assert status == 303 and headers['location'] == f'{here}&msg=saved'
+    row = alice.get(here)[2].decode().split(f'href="/items/{hosting["id"]}"')[1]
+    at_hand = row.split('class="state"')[1].split('<details')[0]
+    assert 'name="voucher"' in at_hand  # a prepped row has the booking form without opening anything
+    booked = {'to': 'booked', 'voucher': 'A 44', 'receipt_attached': 'on', 'back': here}
+    assert alice.post(path, booked)[1]['location'] == f'{here}&msg=saved'
+    assert ok('get_item', {'id': hosting['id']})['booking']['voucher'] == 'A 44'
+    assert f'href="/items/{hosting["id"]}"' not in alice.get(here)[2].decode()
+    assert 'A 44' in alice.get('/items?status=booked&q=hosting')[2].decode()
+
+    # a slip goes to the item page with what is wrong; an address that leads elsewhere is ignored
+    assert alice.post(path, {'to': 'skipped', 'back': here})[0] == 422
+    for elsewhere in ('//attacker.example/items?x', 'https://attacker.example/items?x', '/accounts?x'):
+        status, headers, _ = alice.post(path, {'to': 'new', 'back': elsewhere})
+        assert status == 303 and headers['location'] == f'/items/{hosting["id"]}?msg=saved'
+
+
+def test_an_item_stored_before_a_fact_existed_still_reads(alice):
+    data = pdf('made-up item from an earlier version')
+    item = ok('add_item', {'file_base64': b64(data), 'facts': {'amount': '10.00', 'currency': 'EUR'}})['item']
+    path = os.path.join(store.DATA_DIR, 'users', 'alice', 'items', f'{item["id"]}.json')
+    with open(path, encoding='utf-8') as f:
+        stored = json.load(f)
+    for name in ('exchange_rate', 'exchange_rate_source'):
+        del stored['facts'][name]
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(stored, f)
+    assert alice.get(f'/items/{item["id"]}')[0] == 200 and alice.get('/items?status=all')[0] == 200
+    assert (
+        ok('update_item', {'id': item['id'], 'facts': {'exchange_rate': '11.5'}})['facts']['amount_sek']
+        == '115.00'
+    )
+    ok('update_item', {'id': item['id'], 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
 
 
 def test_static_files_and_sign_out(alice):
