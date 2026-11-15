@@ -18,8 +18,6 @@ from tallyqueue.model import Invalid
         ('1,250.50', '1250.50'),
         ('-99,90', '-99.90'),
         ('−99.90', '-99.90'),
-        (1250, '1250.00'),
-        (1250.5, '1250.50'),
         ('-0', '0.00'),
         ('', None),
         ('   ', None),
@@ -30,7 +28,9 @@ def test_money_is_normalised_to_two_decimals(given, expected):
     assert model.money(given, 'amount') == expected
 
 
-@pytest.mark.parametrize('given', ['12.345', '1,250', 'abc', '12,5,0', 0.1 + 0.2, True, 'NaN', '1e400', [1]])
+@pytest.mark.parametrize(
+    'given', ['12.345', '1,250', 'abc', '12,5,0', 0.1 + 0.2, 1250, 1250.5, True, 'NaN', '1e400', [1]]
+)
 def test_money_refuses_what_it_would_have_to_guess_or_round(given):
     with pytest.raises(Invalid):
         model.money(given, 'amount')
@@ -73,7 +73,7 @@ def kontering(*lines, **extra):
 
 def test_kontering_lines_are_checked_and_spare_rows_dropped():
     cleaned = model.clean_kontering(
-        kontering(('6230', '1000', None), ('2640', '250,00', ''), ('', '', ''), ('1930', None, 1250))
+        kontering(('6230', '1000', None), ('2640', '250,00', ''), ('', '', ''), ('1930', None, '1250'))
     )
     assert [(ln['account'], ln['debit'], ln['credit']) for ln in cleaned['lines']] == [
         ('6230', '1000.00', None),

@@ -47,7 +47,8 @@ checks every figure first.
   should not be booked.
 """
 
-Amount = str | float | int | None
+# Amounts are text in the schema too, so a client is never invited to send a float.
+Amount = str | None
 
 
 class Facts(BaseModel):

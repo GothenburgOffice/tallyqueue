@@ -96,13 +96,16 @@ or a pull request, and report only checks that actually ran.
   `store.update_item`, for the MCP tools and the web page alike: prepped needs date, amount,
   currency and a balanced kontering; booked needs the voucher number and the receipt-attached
   tick; skipped needs a reason. A prepped or booked item must stay that complete.
-- **Amounts are decimal strings with two decimals**, never floats. An amount that would have
-  to be rounded or guessed ("1,250") is refused.
+- **Amounts are decimal strings with two decimals**, never floats: in the tool schema, in
+  `model.money` and on disk. A JSON number is refused, and so is an amount that would have to
+  be rounded or guessed ("1,250").
 - **A duplicate file never overwrites** what is stored.
 - **No JavaScript on the pages.** The page policy is `default-src 'none'` with styles, images
   and frames from this origin only. Templates autoescape; never mark user text as safe.
 - **Receipts are served by content type from the file's bytes**, to their owner only. Anything
-  that is not a PDF or an image goes out as `text/plain` in a sandbox. SVG is not accepted.
+  that is not a PDF or a PNG, JPEG, WebP or GIF image goes out as `text/plain` in a sandbox.
+  That includes HTML, XML and SVG: they are stored as text and never served as a page or an
+  image. Don't add `image/svg+xml` or `text/html` to the served types.
 - **Form posts check the origin, then the session, then the CSRF token** (`web._post`).
 - **Tokens, session ids and receipt contents never reach the log.** A malformed
   `TALLYQUEUE_USERS` entry is reported by position, not echoed.

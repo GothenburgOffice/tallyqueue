@@ -63,15 +63,15 @@ def text(value, field: str, max_len: int, *, multiline: bool = False) -> str | N
 def money(value, field: str) -> str | None:
     """An amount as a string with two decimals ("1250.00"), or None when it is empty.
 
-    Takes a number or text. Text may use a decimal comma and spaces ("1 250,50"). An amount
-    that would have to be rounded is refused, never rounded silently.
+    Takes text only, never a number: an amount is written, not computed, on its way in here.
+    The text may use a decimal comma and spaces ("1 250,50"). An amount that would have to be
+    rounded is refused, never rounded silently.
     """
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        raise Invalid(f'{field}: expected an amount such as 1250.00')
-    raw = repr(value) if isinstance(value, float) else str(value)
-    raw = _SPACES.sub('', raw).replace('−', '-')
+    if not isinstance(value, str):
+        raise Invalid(f'{field}: write the amount as text, like "1250.00", not as a number')
+    raw = _SPACES.sub('', value).replace('−', '-')
     if not raw:
         return None
     if ',' in raw and '.' in raw:  # the last of the two is the decimal sign

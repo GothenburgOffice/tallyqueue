@@ -13,7 +13,10 @@ services:
       - "${CADDY_HTTPS_PORT:-443}:443"
       - "${CADDY_HTTPS_PORT:-443}:443/udp"
     environment:
-      # The address Caddy serves: normally the same as PUBLIC_URL.
+      # Where Caddy listens. Leave SITE_ADDRESS unset: it is then PUBLIC_URL, and Caddy gets
+      # the certificate for that name. Set it only to change how Caddy listens for the same
+      # name, for example ":80" when something in front of it already terminates HTTPS.
+      # It cannot serve another name: the app answers 421 to any host but the one in PUBLIC_URL.
       SITE_ADDRESS: ${SITE_ADDRESS:-${PUBLIC_URL:?Set PUBLIC_URL in .env}}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro

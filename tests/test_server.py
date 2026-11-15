@@ -565,6 +565,46 @@ def test_receipts_are_served_to_their_owner_only(alice, hosting):
     assert bob.get(f'/items/{hosting["id"]}')[0] == 404
 
 
+def test_amounts_are_text_and_a_json_number_is_refused(hosting):
+    for amount in (1250.5, 1250):
+        reply, error = call('update_item', {'id': hosting['id'], 'facts': {'amount': amount}})
+        assert reply is None and 'amount' in error and 'string' in error, error
+    lines = [{'account': '6230', 'debit': 1250.0}, {'account': '2440', 'credit': '1250.00'}]
+    reply, error = call('update_item', {'id': hosting['id'], 'kontering': {'lines': lines}})
+    assert reply is None and 'debit' in error
+    item = ok('get_item', {'id': hosting['id']})
+    assert item['facts']['amount'] == '1250.00' and len(item['kontering']['lines']) == 3
+
+
+def test_a_web_upload_may_be_as_large_as_the_receipt_limit(alice):
+    # The form parser limits the size of text fields, not of the file part: a receipt well over
+    # that field limit is stored, and one over MAX_RECEIPT_BYTES is refused before it is read.
+    big = pdf('made-up large receipt ' + 'x' * 150 * 1024)
+    assert 64 * 1024 < len(big) < store.MAX_RECEIPT_BYTES
+    status, headers, _ = alice.upload('large.pdf', big)
+    assert status == 303 and headers['location'] == f'/items/{sha(big)}?msg=added'
+    assert alice.get(f'/receipts/{sha(big)}')[2] == big
+    too_big = pdf('never stored ' + 'x' * (store.MAX_RECEIPT_BYTES + 70 * 1024))
+    assert alice.upload('too-large.pdf', too_big)[0] == 413
+    assert alice.get(f'/items/{sha(too_big)}')[0] == 404
+    ok('update_item', {'id': sha(big), 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
+def test_an_svg_is_stored_as_text_and_never_served_as_an_image(alice):
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><text>made up</text></svg>'
+    for name in ('drawing.svg', 'renamed.txt'):
+        assert alice.upload(name, svg)[0] == 303
+    item = ok('get_item', {'id': sha(svg)})
+    assert item['receipt']['media_type'] == 'text/plain'
+    assert os.path.exists(os.path.join(store.DATA_DIR, 'users', 'alice', 'receipts', f'{sha(svg)}.txt'))
+    status, headers, body = alice.get(f'/receipts/{sha(svg)}')
+    assert status == 200 and body == svg
+    assert headers['content-type'] == 'text/plain; charset=utf-8'
+    assert 'sandbox' in headers['content-security-policy'] and headers['x-content-type-options'] == 'nosniff'
+    assert b'<img src' not in alice.get(f'/items/{sha(svg)}')[2]
+    ok('update_item', {'id': sha(svg), 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
 def test_an_html_receipt_is_shown_as_text_never_as_a_page(alice):
     page = b'<html><body><script>alert(1)</script>Kvitto 59 kr (made up)</body></html>'
     assert alice.upload('mail.html', page)[0] == 303

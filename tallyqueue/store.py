@@ -101,8 +101,10 @@ def _read_json(path: str):
 def sniff(data: bytes, filename: str = '') -> tuple[str, str]:
     """(extension, media type) from the file's content. Raises for a type that is not accepted.
 
-    The content decides, not the name. Text is always served back as plain text, so an HTML
-    receipt can never run as a page from this server.
+    The content decides, not the name. Only PDF and the four raster image types get a type of
+    their own. Everything else that is UTF-8 text is "text", whatever it calls itself: a saved
+    HTML mail, an XML e-invoice, an SVG. Text is always served back as plain text, so none of
+    them can ever run as a page or be drawn as an image from this server.
     """
     for magic, ext, media in _MAGIC:
         if data.startswith(magic):
