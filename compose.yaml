@@ -1,0 +1,28 @@
+# Built from this checkout. For the published image without a checkout, use compose.images.yaml.
+name: tallyqueue
+services:
+  app:
+    build:
+      context: .
+      target: production
+    restart: unless-stopped
+    # Only this machine can reach the port: put an HTTPS reverse proxy such as Caddy in front
+    # (README, "Behind Caddy"), or add compose.caddy.yaml.
+    ports:
+      - "127.0.0.1:${APP_PORT:-3440}:8000"
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3440}
+      TALLYQUEUE_USERS: ${TALLYQUEUE_USERS:-}
+      MAX_RECEIPT_BYTES: ${MAX_RECEIPT_BYTES:-15728640}
+      SOURCE_URL: ${SOURCE_URL:-}
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  data:

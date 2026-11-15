@@ -1,0 +1,142 @@
+name: Verify
+on:
+  push:
+    branches: [main]
+  # Draft pull requests run too: the checks take a few minutes and the repository is public.
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  # Only PR runs are superseded; every main run finishes so each merge gets an image.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff format --check .
+      - run: ruff check .
+      - run: python -m pytest -q
+      # Known vulnerabilities in the exact versions the image installs.
+      - run: pip-audit --no-deps --disable-pip -r constraints.txt
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # The production image built from source, behind Caddy, as it is meant to run.
+      COMPOSE_FILE: compose.yaml:compose.caddy.yaml
+      COMPOSE_PROJECT_NAME: tallyqueue-ci
+      PUBLIC_URL: http://localhost
+      # A disposable user for this run: the pair is the SHA-256 of the token below.
+      TALLYQUEUE_TOKEN: tq_ci-only-disposable-token-for-this-run-only
+      TALLYQUEUE_USERS: ci:c5bad0ad6778e451f871f72be8261368971e767bd4b12c3f7e7c6e26b359174c
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.13"
+      # The smoke test is an MCP client, so it needs the SDK.
+      - run: pip install -r requirements.txt
+      - name: The CI token matches its pair
+        run: test "ci:$(printf %s "$TALLYQUEUE_TOKEN" | sha256sum | cut -d' ' -f1)" = "$TALLYQUEUE_USERS"
+      - name: Start the stack
+        run: docker compose up --build -d --wait --wait-timeout 180
+      - name: Smoke test through Caddy
+        run: python scripts/smoke.py http://localhost
+      - name: Items and receipts survive a restart
+        run: |
+          docker compose restart app
+          docker compose up -d --wait --wait-timeout 60
+          python scripts/smoke.py http://localhost --verify
+      - name: The container is locked down
+        run: |
+          test "$(docker compose exec -T app id -u)" = 10001
+          if docker compose exec -T app touch /app/probe; then echo "::error::/app is writable"; exit 1; fi
+          if docker compose port app 8000 | grep -q '[1-9]'; then echo "::error::the app port is published"; exit 1; fi
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose logs --tail=100
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
+  publish:
+    name: Test release image and publish to GHCR
+    # The containers job already builds and tests the same production target from source, so
+    # pull requests skip this job: the image-only Compose file and the push are checked on main.
+    if: github.event_name != 'pull_request'
+    needs: [unit, containers]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-ghcr-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      COMPOSE_FILE: compose.images.yaml:compose.caddy.yaml
+      COMPOSE_PROJECT_NAME: tallyqueue-release
+      PUBLIC_URL: http://localhost
+      TALLYQUEUE_TOKEN: tq_ci-only-disposable-token-for-this-run-only
+      TALLYQUEUE_USERS: ci:c5bad0ad6778e451f871f72be8261368971e767bd4b12c3f7e7c6e26b359174c
+      TALLYQUEUE_IMAGE: tallyqueue:candidate
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt
+      - name: Build release candidate
+        run: docker build --target production --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag "$TALLYQUEUE_IMAGE" .
+      - name: Test image-only Compose deployment
+        run: docker compose up -d --wait --wait-timeout 180
+      - run: python scripts/smoke.py http://localhost
+      - name: Verify release-image persistence
+        run: |
+          docker compose restart app
+          docker compose up -d --wait --wait-timeout 60
+          python scripts/smoke.py http://localhost --verify
+      - name: Sign in to GHCR
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the exact tested image
+        if: github.ref == 'refs/heads/main'
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          image="ghcr.io/${REPOSITORY,,}"
+          docker tag "$TALLYQUEUE_IMAGE" "$image:sha-$GITHUB_SHA"
+          docker push "$image:sha-$GITHUB_SHA"
+          docker tag "$TALLYQUEUE_IMAGE" "$image:latest"
+          docker push "$image:latest"
+          echo "PUBLISHED_IMAGE=$image:sha-$GITHUB_SHA" >> "$GITHUB_ENV"
+          {
+            echo '### Published image'
+            echo "\`$image:sha-$GITHUB_SHA\`"
+            echo 'This exact linux/amd64 image passed the image-only deployment, smoke and restart checks before publishing.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify public anonymous pull
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p "$RUNNER_TEMP/anonymous-docker"
+          if ! docker --config "$RUNNER_TEMP/anonymous-docker" pull "$PUBLISHED_IMAGE"; then
+            echo "::error::The image was pushed but is not anonymously accessible. For the first publication, set the GHCR package visibility to public in GitHub package settings, then rerun this job."
+            exit 1
+          fi
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose logs --tail=100
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v

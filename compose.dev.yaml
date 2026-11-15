@@ -1,0 +1,20 @@
+# Development override: docker compose -f compose.yaml -f compose.dev.yaml up
+# The source is bind-mounted and the server restarts when it changes. All dev-only settings
+# live here, so a dev stack never uses the real values in .env or the real data volume.
+services:
+  app:
+    build:
+      target: development
+    environment:
+      TALLYQUEUE_RELOAD: "1"
+      PUBLIC_URL: ${DEV_PUBLIC_URL:-http://localhost:${APP_PORT:-3440}}
+      # The dev sign-in is public on purpose: user "dev", token
+      # tq_dev-only-public-token-not-for-real-data.
+      # It guards made-up data on a port only this machine can reach. Never use it anywhere else.
+      TALLYQUEUE_USERS: ${DEV_TALLYQUEUE_USERS:-dev:7656301d8b93a8352f9cebcde52919d6d693e7c4298c5ff3959ed1b7aedf77ff}
+    volumes:
+      - .:/app
+      - dev_data:/data
+    read_only: false
+volumes:
+  dev_data:

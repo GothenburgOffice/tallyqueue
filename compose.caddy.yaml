@@ -1,0 +1,33 @@
+# Optional: Caddy in front, for a host that has no HTTPS reverse proxy of its own.
+#   docker compose -f compose.images.yaml -f compose.caddy.yaml up -d
+# Caddy gets a certificate for the host in PUBLIC_URL by itself: the name must point at this
+# machine and ports 80 and 443 must reach it. The app port is then not published at all.
+services:
+  app:
+    ports: !reset []
+  caddy:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+      - "${CADDY_HTTPS_PORT:-443}:443/udp"
+    environment:
+      # The address Caddy serves: normally the same as PUBLIC_URL.
+      SITE_ADDRESS: ${SITE_ADDRESS:-${PUBLIC_URL:?Set PUBLIC_URL in .env}}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  caddy_data:
+  caddy_config:
