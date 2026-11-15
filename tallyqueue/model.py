@@ -1,0 +1,281 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Gothenburg Office
+"""What an item holds, and the checks on it. Pure functions: no files and no network.
+
+Nothing here decides how something should be booked. The checks only catch slips: a
+malformed date, an amount with three decimals, a kontering that does not balance.
+"""
+
+from __future__ import annotations
+
+import datetime
+import re
+from decimal import Decimal, InvalidOperation
+
+STATUSES = ('new', 'prepped', 'booked', 'skipped')
+KINDS = ('receipt', 'invoice', 'credit_note', 'other')
+FACT_FIELDS = (
+    'kind',
+    'date',
+    'counterparty',
+    'description',
+    'amount',
+    'currency',
+    'vat_amount',
+    'amount_sek',
+    'invoice_number',
+    'due_date',
+    'payment_date',
+)
+MAX_LINES = 40
+MAX_ACCOUNTS = 5000
+
+_DATES = ('date', 'due_date', 'payment_date')
+_MONEY = ('amount', 'vat_amount', 'amount_sek')
+_TEXT = {'counterparty': 200, 'description': 500, 'invoice_number': 100}
+_ACCOUNT = re.compile(r'\d{4,6}')
+_CURRENCY = re.compile(r'[A-Z]{3}')
+_ISO_DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
+_SPACES = re.compile(r"[\s   ']")
+_CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+_LIMIT = Decimal('1000000000000')
+
+
+class Invalid(ValueError):
+    """A value the user or the client has to correct. The message is shown as it is."""
+
+
+def text(value, field: str, max_len: int, *, multiline: bool = False) -> str | None:
+    """A trimmed string, or None when it is empty."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise Invalid(f'{field}: expected text')
+    value = _CONTROL.sub('', value.replace('\r\n', '\n').replace('\r', '\n'))
+    if not multiline:
+        value = ' '.join(value.split())
+    value = value.strip()
+    if len(value) > max_len:
+        raise Invalid(f'{field}: at most {max_len} characters')
+    return value or None
+
+
+def money(value, field: str) -> str | None:
+    """An amount as a string with two decimals ("1250.00"), or None when it is empty.
+
+    Takes a number or text. Text may use a decimal comma and spaces ("1 250,50"). An amount
+    that would have to be rounded is refused, never rounded silently.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise Invalid(f'{field}: expected an amount such as 1250.00')
+    raw = repr(value) if isinstance(value, float) else str(value)
+    raw = _SPACES.sub('', raw).replace('−', '-')
+    if not raw:
+        return None
+    if ',' in raw and '.' in raw:  # the last of the two is the decimal sign
+        cut = max(raw.rfind(','), raw.rfind('.'))
+        raw = re.sub(r'[.,]', '', raw[:cut]) + '.' + raw[cut + 1 :]
+    else:
+        raw = raw.replace(',', '.')
+    try:
+        amount = Decimal(raw)
+    except InvalidOperation:
+        raise Invalid(f'{field}: "{value}" is not an amount. Write it like 1250.00') from None
+    if not amount.is_finite() or abs(amount) >= _LIMIT:
+        raise Invalid(f'{field}: "{value}" is not an amount. Write it like 1250.00')
+    # Counted in digits, not by value: "1,250" may be meant as 1250 and must not pass as 1.25.
+    if amount.as_tuple().exponent < -2:
+        raise Invalid(f'{field}: "{value}" has more than two decimals')
+    return f'{amount + 0:.2f}'  # + 0 turns -0 into 0
+
+
+def iso_date(value, field: str) -> str | None:
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+    try:
+        if not _ISO_DATE.fullmatch(value):
+            raise ValueError
+        return datetime.date.fromisoformat(value).isoformat()
+    except ValueError:
+        raise Invalid(f'{field}: "{value}" is not a date. Write it like 2026-03-31') from None
+
+
+def clean_facts(changes: dict) -> dict:
+    """Checked changes to an item's facts. A value of None (or empty text) clears the fact."""
+    out = {}
+    for key, value in changes.items():
+        if key not in FACT_FIELDS:
+            raise Invalid(f'Unknown fact "{key}". The facts are: {", ".join(FACT_FIELDS)}')
+        if isinstance(value, str) and not value.strip():
+            value = None
+        if value is None:
+            out[key] = None
+        elif key in _DATES:
+            out[key] = iso_date(value, key)
+        elif key in _MONEY:
+            out[key] = money(value, key)
+        elif key == 'currency':
+            code = str(value).strip().upper()
+            if not _CURRENCY.fullmatch(code):
+                raise Invalid(f'currency: "{value}" is not a three-letter code such as SEK or EUR')
+            out[key] = code
+        elif key == 'kind':
+            if value not in KINDS:
+                raise Invalid(f'kind: one of {", ".join(KINDS)}')
+            out[key] = value
+        else:
+            out[key] = text(value, key, _TEXT[key])
+    return out
+
+
+def clean_kontering(value: dict | None) -> dict | None:
+    """A checked kontering, or None when it holds nothing (which clears it).
+
+    Every line has an account and an amount on one side, debit or credit. Rows that are
+    completely empty are dropped, so a form can send its spare rows.
+    """
+    if not value:
+        return None
+    if not isinstance(value, dict):
+        raise Invalid('kontering: expected lines, vat_treatment and note')
+    lines = []
+    for n, raw in enumerate(value.get('lines') or [], 1):
+        if not isinstance(raw, dict):
+            raise Invalid(f'Line {n}: expected account, debit or credit, and text')
+        account = str(raw.get('account') or '').strip()
+        debit = money(raw.get('debit'), f'Line {n} debit')
+        credit = money(raw.get('credit'), f'Line {n} credit')
+        debit = None if debit is not None and Decimal(debit) == 0 else debit
+        credit = None if credit is not None and Decimal(credit) == 0 else credit
+        line_text = text(raw.get('text'), f'Line {n} text', 200)
+        if not account and debit is None and credit is None and not line_text:
+            continue
+        if not _ACCOUNT.fullmatch(account):
+            raise Invalid(f'Line {n}: the account is 4 to 6 digits, not "{account}"')
+        if (debit is None) == (credit is None):
+            raise Invalid(f'Line {n} (account {account}): give a debit or a credit amount, one of them')
+        if Decimal(debit or credit) < 0:
+            raise Invalid(f'Line {n} (account {account}): amounts are positive. Use the other side instead')
+        lines.append({'account': account, 'debit': debit, 'credit': credit, 'text': line_text})
+    if len(lines) > MAX_LINES:
+        raise Invalid(f'kontering: at most {MAX_LINES} lines')
+    vat_treatment = text(value.get('vat_treatment'), 'vat_treatment', 200)
+    note = text(value.get('note'), 'note', 1000, multiline=True)
+    if not lines and not vat_treatment and not note:
+        return None
+    return {'lines': lines, 'vat_treatment': vat_treatment, 'note': note}
+
+
+def totals(kontering: dict | None) -> tuple[Decimal, Decimal]:
+    """The sum of the debit side and of the credit side."""
+    lines = (kontering or {}).get('lines') or []
+    debit = sum((Decimal(ln['debit']) for ln in lines if ln.get('debit')), Decimal(0))
+    credit = sum((Decimal(ln['credit']) for ln in lines if ln.get('credit')), Decimal(0))
+    return debit, credit
+
+
+def prep_problems(item: dict) -> list[str]:
+    """What is missing before the item can be called prepped. Empty when nothing is."""
+    problems = []
+    facts = item.get('facts') or {}
+    missing = [name for name in ('date', 'amount', 'currency') if not facts.get(name)]
+    if missing:
+        problems.append(f'Missing facts: {", ".join(missing)}')
+    lines = (item.get('kontering') or {}).get('lines') or []
+    if len(lines) < 2:
+        problems.append('The kontering needs at least two lines')
+    else:
+        debit, credit = totals(item['kontering'])
+        if debit != credit:
+            problems.append(f'The kontering does not balance: debit {debit:.2f}, credit {credit:.2f}')
+    return problems
+
+
+def booking_problems(item: dict) -> list[str]:
+    """What is missing before the item can be called booked."""
+    booking = item.get('booking') or {}
+    problems = []
+    if not booking.get('voucher'):
+        problems.append('The voucher number from the bookkeeping service is missing')
+    if not booking.get('receipt_attached'):
+        problems.append('Confirm that the receipt is attached to the voucher in the bookkeeping service')
+    return problems
+
+
+def status_problems(item: dict, status: str) -> list[str]:
+    """Why the item cannot have this status, if anything."""
+    if status == 'prepped':
+        return prep_problems(item)
+    if status == 'booked':
+        return booking_problems(item)
+    if status == 'skipped' and not item.get('skip_reason'):
+        return ['Say why the item is skipped']
+    return []
+
+
+def warnings(item: dict, accounts: list[dict], others: list[dict]) -> list[str]:
+    """Things worth a second look. They never stop a save."""
+    out = []
+    facts = item.get('facts') or {}
+    kontering = item.get('kontering') or {}
+    lines = kontering.get('lines') or []
+    if lines:
+        debit, credit = totals(kontering)
+        if debit != credit:
+            out.append(f'The kontering does not balance: debit {debit:.2f}, credit {credit:.2f}')
+        if facts.get('currency') not in (None, 'SEK') and not facts.get('amount_sek'):
+            out.append(
+                f'The amount is in {facts["currency"]} and amount_sek is empty: the kontering is in SEK'
+            )
+        if accounts:
+            known = {a['account'] for a in accounts}
+            unknown = sorted({ln['account'] for ln in lines} - known)
+            if unknown:
+                out.append(f'Not in your list of accounts: {", ".join(unknown)}')
+    twins = [o['id'][:12] for o in others if _same_purchase(item, o)]
+    if twins:
+        out.append(f'Same date, amount and currency as: {", ".join(twins)}. Possibly the same purchase')
+    return out
+
+
+def _same_purchase(a: dict, b: dict) -> bool:
+    if a['id'] == b['id']:
+        return False
+    fa, fb = a.get('facts') or {}, b.get('facts') or {}
+    return all(fa.get(k) and fa.get(k) == fb.get(k) for k in ('date', 'amount', 'currency'))
+
+
+_ACCOUNT_LINE = re.compile(r'(\d{4,6})(?:[\s;,:=\-–]+(.*))?')
+_SIE_KONTO = re.compile(r'#KONTO\s+(\d{4,6})\s+(?:"((?:[^"\\]|\\.)*)"|(\S.*))')
+
+
+def parse_accounts(source: str) -> list[dict]:
+    """The user's own list of accounts, from pasted text.
+
+    One account per line: "1930 Företagskonto", "1930;Företagskonto", or a SIE line
+    (#KONTO 1930 "Företagskonto"). Other lines that start with # are skipped, so a whole
+    SIE file can be pasted.
+    """
+    accounts: dict[str, str] = {}
+    for n, line in enumerate(source.splitlines(), 1):
+        line = line.strip().lstrip('﻿')
+        if not line:
+            continue
+        if line.startswith('#'):
+            m = _SIE_KONTO.fullmatch(line)
+            if m:
+                name = m.group(2) if m.group(2) is not None else m.group(3)
+                accounts[m.group(1)] = text(name.replace('\\"', '"'), f'Line {n}', 200) or ''
+            continue
+        m = _ACCOUNT_LINE.fullmatch(line)
+        if not m:
+            raise Invalid(f'Line {n}: expected an account number and its name, like "1930 Företagskonto"')
+        accounts[m.group(1)] = text(m.group(2) or '', f'Line {n}', 200) or ''
+    if len(accounts) > MAX_ACCOUNTS:
+        raise Invalid(f'At most {MAX_ACCOUNTS} accounts')
+    return [{'account': number, 'name': accounts[number]} for number in sorted(accounts)]

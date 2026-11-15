@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Items{% endblock %}
+{% block main %}
+<h1>Receipts and invoices to book</h1>
+
+<nav class="tabs" aria-label="Status">
+  {% for key, label in tabs %}
+  <a href="/items?status={{ key }}{% if query %}&amp;q={{ query|urlencode }}{% endif %}"
+     {% if key == status %}aria-current="page"{% endif %}>{{ label }} <span class="count">{{ counts[key] }}</span></a>
+  {% endfor %}
+</nav>
+
+<form method="get" action="/items" class="search">
+  <input type="hidden" name="status" value="{{ status }}">
+  <label for="q" class="hidden">Search</label>
+  <input id="q" name="q" type="search" value="{{ query }}" placeholder="Counterparty, text, invoice or voucher number">
+  <button class="quiet">Search</button>
+</form>
+
+{% if items %}
+<div class="scroll">
+<table class="list">
+  <thead>
+    <tr>
+      <th scope="col">Date</th>
+      <th scope="col">Counterparty</th>
+      <th scope="col" class="num">Total</th>
+      <th scope="col" class="num">VAT</th>
+      <th scope="col">Kontering</th>
+      <th scope="col">Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in items %}
+    <tr>
+      <td class="nowrap">{{ item.facts.date or '–' }}</td>
+      <td>
+        <a href="/items/{{ item.id }}">{{ item.facts.counterparty or item.receipt.filename }}</a>
+        {% if item.facts.description %}<div class="sub">{{ item.facts.description }}</div>{% endif %}
+      </td>
+      <td class="num nowrap">{% if item.facts.amount %}{{ item.facts.amount }} {{ item.facts.currency or '' }}{% else %}–{% endif %}</td>
+      <td class="num nowrap">{{ item.facts.vat_amount or '–' }}</td>
+      <td class="sub">
+        {% for line in (item.kontering.lines if item.kontering else []) %}
+        <span class="nowrap">{{ 'D' if line.debit else 'C' }} {{ line.account }} {{ line.debit or line.credit }}</span>{% if not loop.last %}, {% endif %}
+        {% else %}–{% endfor %}
+      </td>
+      <td class="nowrap">
+        <span class="status {{ item.status }}">{{ item.status }}</span>
+        {% if item.booking and item.booking.voucher %}<div class="sub">{{ item.booking.voucher }}</div>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="empty">{% if query %}Nothing here matches “{{ query }}”.{% elif status == 'todo' %}Nothing to do. Everything in the list is booked or skipped.{% else %}Nothing here.{% endif %}</p>
+{% endif %}
+
+<section class="panel">
+  <h2>Add a receipt or invoice</h2>
+  <form method="post" action="/items" enctype="multipart/form-data" class="row">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <label for="file" class="hidden">File</label>
+    <input id="file" name="file" type="file" required
+           accept=".pdf,.png,.jpg,.jpeg,.webp,.gif,.txt,.eml,.html,.htm,application/pdf,image/*,text/plain">
+    <button>Add</button>
+  </form>
+  <p class="hint">{{ accepted }}, up to {{ max_mb }} MB. The same file is never added twice. The
+  file kept here is a working copy: the archived receipt belongs in your bookkeeping service.</p>
+</section>
+{% endblock %}

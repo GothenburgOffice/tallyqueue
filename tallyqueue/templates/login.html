@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block main %}
+<section class="narrow">
+  <h1>Sign in</h1>
+  {% if open %}
+  <form method="post" action="/login" class="stack">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label for="token">Access token</label>
+    <input id="token" name="token" type="password" autocomplete="current-password" required autofocus>
+    <button>Sign in</button>
+  </form>
+  <p class="hint">The token is the one the operator of this server made for you. This server is
+  for approved users only.</p>
+  {% else %}
+  <p>No users are approved on this server yet, so nobody can sign in. The operator adds users in
+  <code>TALLYQUEUE_USERS</code>.</p>
+  {% endif %}
+</section>
+{% endblock %}

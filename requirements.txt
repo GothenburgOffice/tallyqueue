@@ -1,0 +1,9 @@
+# What TallyQueue imports, at exact versions. Everything they pull in is pinned in
+# constraints.txt, so every build installs the same set (see README, "Dependencies").
+-c constraints.txt
+mcp==2.3.0
+uvicorn==0.54.0
+# Escapes everything the web pages show.
+Jinja2==3.1.6
+# Reads form posts and file uploads (Starlette needs it for request.form()).
+python-multipart==0.0.33
