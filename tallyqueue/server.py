@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from . import __version__, auth, config, model, store, web
+from . import __version__, auth, config, model, riksbank, store, web
 
 INSTRUCTIONS = """TallyQueue is the user's to-do list of receipts and invoices that are waiting to be booked.
 It is a helper, not a ledger: the user does the bookkeeping in their own bookkeeping service, and
@@ -44,8 +44,8 @@ checks every figure first.
 - The books are kept in SEK. For a document in another currency, give the total in SEK one of two
   ways: amount_sek as it is, when the receipt or the card or bank statement shows what was drawn;
   or exchange_rate (SEK for one unit of the currency), and amount_sek is worked out from it. When
-  neither the receipt nor a statement gives it, use Riksbanken's rate for the date. Always say
-  where the figure comes from in exchange_rate_source. Never estimate a rate.
+  neither the receipt nor a statement gives it, get Riksbanken's rate with get_riksbank_rate. Always
+  say where the figure comes from in exchange_rate_source. Never estimate a rate.
 - Statuses: new, then prepped (facts and a balanced kontering are in place), then booked (the user
   booked it in their bookkeeping service). Mark an item booked only when the user tells you the
   voucher number and that the receipt is attached there. Use skipped, with a reason, for what
@@ -307,7 +307,7 @@ empty list of lines clears it.
 Another currency than SEK: give facts.exchange_rate (SEK for one unit, e.g. "11.4235"; amount_sek is
 worked out from it), or facts.amount_sek as the card or bank statement shows it. Not both, unless they
 agree to the öre. Say where it comes from in facts.exchange_rate_source ("receipt", "card statement",
-"Riksbanken 2026-10-19"). With no rate on the receipt or a statement, use Riksbanken's rate for the date.
+"Riksbanken 2026-10-19"). With no rate on the receipt or a statement, call get_riksbank_rate.
 
 status:
 - prepped: the facts date, amount and currency are in place, the total in SEK is known when the
@@ -359,6 +359,32 @@ TallyQueue does not include the BAS chart of accounts.""",
 async def list_accounts(ctx: Context) -> list:
     accounts = await _store(store.read_accounts, _user(ctx))
     return [_text({'count': len(accounts), 'accounts': accounts})]
+
+
+@mcp.tool(
+    description="""Riksbanken's published exchange rate for a currency on a date: SEK for one unit of it.
+
+Use it for a document in another currency than SEK, and only when neither the document nor a card or
+bank statement gives a rate or the total in SEK. date: the payment date when it is known, otherwise
+the date on the document. On a weekend or a holiday the answer is the latest rate before the date,
+and says which date it is from.
+
+Nothing is stored by this call. Give the answer to update_item: rate as facts.exchange_rate and source
+as facts.exchange_rate_source. Riksbanken publishes its rates for information only; the user checks
+the figure. Riksbanken allows only a few lookups a minute, so look up one rate per document.""",
+    structured_output=False,
+)
+async def get_riksbank_rate(
+    currency: Annotated[str, Field(description='Three-letter code: EUR, USD.', min_length=3, max_length=3)],
+    date: Annotated[str, Field(description='The date the rate is for, YYYY-MM-DD.')],
+    ctx: Context,
+) -> list:
+    _user(ctx)
+    try:
+        found = await anyio.to_thread.run_sync(lambda: riksbank.rate(currency, date))
+    except riksbank.RateUnavailable as e:
+        raise ToolError(str(e)) from None
+    return [_text(found | {'unit': f'SEK for 1 {found["currency"]}'})]
 
 
 # ---------------------------------------------------------------- HTTP routes

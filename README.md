@@ -43,7 +43,18 @@ be prepped. It is given one of two ways, by the AI client or by you in the web p
 - the **total in SEK as it is**, for example what the card statement says was drawn.
 
 Beside it goes where the figure comes from: the receipt, the card statement, or Riksbanken's rate
-for the date when neither of the first two has it. TallyQueue looks no rates up itself.
+for the date when neither of the first two has it.
+
+TallyQueue can fetch Riksbanken's rate, and only when asked: a button on the item's page, with a
+date you pick, and a tool for the AI client. On a weekend or a holiday it takes the latest rate
+before the date and says which date that was. Three things to know:
+
+- Riksbanken publishes its rates for information and calls them "indicative only". Whether that
+  rate is the right one for your books is yours to decide, like every figure here.
+- The request goes from your server to `api.riksbank.se` and carries the currency code and
+  dates, nothing about the receipt. Riksbanken logs the address the request comes from. This is
+  the only call TallyQueue makes to another service; `RIKSBANK_LOOKUP=0` turns it off.
+- Riksbanken allows only a few lookups a minute. TallyQueue remembers the rates it has fetched.
 
 ## What it does not do
 
@@ -116,6 +127,7 @@ docker compose -f compose.images.yaml -f compose.caddy.yaml up -d
 | `APP_PORT` | Port on the host that the reverse proxy forwards to (default 3440) |
 | `MAX_RECEIPT_BYTES` | Largest receipt file (default 15 MB) |
 | `SOURCE_URL` | Where users of your server get its source, if you run a changed version |
+| `RIKSBANK_LOOKUP` | `0` turns off fetching exchange rates from Riksbanken (default on) |
 | `TALLYQUEUE_IMAGE` | A pinned image for `compose.images.yaml`, such as a `sha-…` tag |
 
 ## The web page
@@ -129,8 +141,9 @@ service) or skipped (with a reason), and back to new. A prepped item has the boo
 in its row, so after booking something you type the voucher number, tick the box and are done.
 
 The item's page shows the receipt beside its status, the kontering and the facts, which you can
-correct. For another currency than SEK the facts take the exchange rate or the total in SEK. You
-can also add a receipt file by hand, and delete an item.
+correct. For another currency than SEK the facts take the exchange rate or the total in SEK, and
+under them a button fetches Riksbanken's rate for a date. You can also add a receipt file by
+hand, and delete an item.
 
 Under **Accounts** you paste the accounts you use, one per line (`1930 Företagskonto`). A SIE
 file can be pasted as it is; only its `#KONTO` lines are read. TallyQueue then warns when a
@@ -165,6 +178,7 @@ The single quotes store the placeholder, and `claude` fills it in from the envir
 | `get_item` | One item in full, with what is missing, warnings and its history |
 | `update_item` | Changes the facts, the proposed kontering, the status or the notes |
 | `list_accounts` | Your own list of accounts, if you have pasted one |
+| `get_riksbank_rate` | Riksbanken's rate for a currency on a date. Stores nothing; the client gives the rate to `update_item` |
 
 The tool descriptions tell the client the rules: only facts that are on the document, amounts as
 text with two decimals, a kontering in SEK that balances, for another currency the exchange rate

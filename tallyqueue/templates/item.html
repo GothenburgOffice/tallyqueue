@@ -156,6 +156,16 @@
     {% endfor %}
     <div class="actions"><button>Save facts</button></div>
   </form>
+  {% if lookup %}
+  <form method="post" action="/items/{{ item.id }}/riksbanken" class="row boxed">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <label for="rate_date">Riksbanken's rate for 1 {{ item.facts.currency }} on</label>
+    <input id="rate_date" name="rate_date" type="date" required value="{{ item.facts.payment_date or item.facts.date or '' }}">
+    <button class="quiet">Fetch and save</button>
+    <span class="hint">On a weekend or a holiday it is the latest rate before the date. Riksbanken
+    publishes its rates for information only: check the figure.</span>
+  </form>
+  {% endif %}
   <datalist id="rate-sources">
     <option value="receipt"></option>
     <option value="card statement"></option>

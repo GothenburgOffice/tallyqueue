@@ -85,8 +85,10 @@ or a pull request, and report only checks that actually ran.
 - `tallyqueue/config.py`: settings from the environment and the Host and Origin checks.
   `PUBLIC_URL` is the one source for links, the allowed host and origin, and the Secure cookie.
 - `tallyqueue/server.py`: the MCP tools (`add_item`, `list_items`, `get_item`, `update_item`,
-  `list_accounts`), `POST /upload`, `/health`, and `build_app()`, which wraps the app with the
-  host check, the token check on `/mcp` and the default response headers.
+  `list_accounts`, `get_riksbank_rate`), `POST /upload`, `/health`, and `build_app()`, which
+  wraps the app with the host check, the token check on `/mcp` and the default response headers.
+- `tallyqueue/riksbank.py`: Riksbanken's published rate for a currency on a date, fetched on
+  request and remembered in memory.
 - `tallyqueue/web.py` with `templates/` and `static/`: the web page. Server-rendered forms.
   `templates/_macros.html` holds what the list and the item page share: the kontering written
   out as a voucher, and the status forms. The stylesheet's address carries a checksum of its
@@ -108,8 +110,13 @@ or a pull request, and report only checks that actually ran.
   every change of facts. The total in SEK is either worked out from a given `exchange_rate`
   (the one place an amount is computed: amount × rate, rounded half up to öre) or given as it
   is in `amount_sek`, and then no rate is kept. A stored rate and a stored total never
-  disagree, and an amount in SEK has neither. No rate is ever looked up or estimated here: it
-  is given, with its source in `exchange_rate_source`.
+  disagree, and an amount in SEK has neither. A rate is never estimated: it is given, with its
+  source in `exchange_rate_source`.
+- **`riksbank.py` is the only code that calls another service**, and only when a user asks: the
+  button on the item's page or the `get_riksbank_rate` tool. The address is fixed but for a
+  checked currency code and two dates; redirects are not followed; the rate is read as the
+  digits sent, never as a float; `RIKSBANK_LOOKUP=0` turns it off. Nothing about a receipt or a
+  user goes out. Tests stand in for the network (`riksbank._get`) and never call Riksbanken.
 - **Every status can be changed by hand in the web page**, in the list and on the item's page,
   through the same forms (`templates/_macros.html`). The AI client is never the only way.
 - **A duplicate file never overwrites** what is stored.

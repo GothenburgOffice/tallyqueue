@@ -20,7 +20,7 @@ import jinja2
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import __version__, auth, config, model, store
+from . import __version__, auth, config, model, riksbank, store
 
 sessions = auth.Sessions()
 COOKIE = '__Host-tallyqueue' if config.SECURE else 'tallyqueue'
@@ -48,6 +48,7 @@ FLASH = {
     'duplicate': 'That file is already in the list. This is the item; nothing was changed.',
     'deleted': 'The item and its receipt were deleted.',
     'accounts': 'Your list of accounts was saved.',
+    'rate': "Riksbanken's rate was fetched and saved with the facts. Check that it is for the date you want.",
 }
 TABS = (
     ('todo', 'To do'),
@@ -285,6 +286,8 @@ async def _item_page(request: Request, session: auth.Session, item: dict, **cont
             'implied': None if draft_facts else model.implied_rate(saved),
         },
         edit_kontering=item['status'] == 'new' or draft_kontering is not None,
+        # Riksbanken's rate can be fetched for the saved currency, on a date the user picks.
+        lookup=riksbank.ENABLED and saved['currency'] not in (None, 'SEK'),
         fact_labels=FACT_LABELS,
         kinds=model.KINDS,
         lines=lines + [{'account': '', 'debit': '', 'credit': '', 'text': ''}] * SPARE_ROWS,
@@ -345,6 +348,14 @@ async def change(request: Request) -> Response:
                 }
             elif to == 'skipped':
                 changes['skip_reason'] = str(form.get('skip_reason', ''))
+        elif action == 'riksbanken' and riksbank.ENABLED:
+            # The rate for the item's saved currency. It is saved like a rate typed by hand, so
+            # the total in SEK is worked out from it and the source says where it is from.
+            current = await _run(store.get_item, session.user, ref)
+            found = await _run(
+                riksbank.rate, current['facts']['currency'] or '', str(form.get('rate_date', ''))
+            )
+            changes = {'facts': {'exchange_rate': found['rate'], 'exchange_rate_source': found['source']}}
         elif action == 'delete':
             if 'confirm' not in form:
                 raise store.StoreError(
@@ -357,7 +368,7 @@ async def change(request: Request) -> Response:
         await _run(store.update_item, session.user, ref, via='web', **changes)
     except store.NotFound as e:
         return _message(session, 404, 'Not found', str(e))
-    except (store.StoreError, model.Invalid) as e:
+    except (store.StoreError, model.Invalid, riksbank.RateUnavailable) as e:
         try:
             current = await _run(store.get_item, session.user, ref)
         except store.StoreError:
@@ -367,7 +378,7 @@ async def change(request: Request) -> Response:
     back = str(form.get('back', ''))
     if back.startswith('/items?') and _safe_next(back) == back:
         return _redirect(f'{back}&msg=saved')
-    return _redirect(f'/items/{ref}?msg=saved')
+    return _redirect(f'/items/{ref}?msg={"rate" if action == "riksbanken" else "saved"}')
 
 
 async def receipt(request: Request) -> Response:

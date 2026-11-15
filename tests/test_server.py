@@ -742,6 +742,61 @@ def test_an_item_stored_before_a_fact_existed_still_reads(alice):
     ok('update_item', {'id': item['id'], 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
 
 
+def test_riksbankens_rate_on_a_button_and_as_a_tool(alice, monkeypatch):
+    # The network is stood in for: tests never call Riksbanken.
+    from tallyqueue import riksbank
+
+    asked = []
+
+    def get(url):
+        asked.append(url)
+        return 200, {}, b'[{"date":"2026-11-04","value":10.4321},{"date":"2026-11-05","value":10.5}]'
+
+    monkeypatch.setattr(riksbank, '_cache', {})
+    monkeypatch.setattr(riksbank, 'ENABLED', True)
+    monkeypatch.setattr(riksbank, '_get', get)
+
+    data = pdf('Example Maps Inc, receipt 7, 8.00 USD (made up)')
+    assert alice.upload('maps.pdf', data)[0] == 303
+    path = f'/items/{sha(data)}'
+    button = f'action="{path}/riksbanken"'
+    assert button not in alice.get(path)[2].decode()  # nothing to look up before there is a currency
+    ok('update_item', {'id': sha(data), 'facts': {'date': '2026-11-05', 'amount': '8.00', 'currency': 'USD'}})
+    page = alice.get(path)[2].decode()
+    assert button in page and 'name="rate_date" type="date" required value="2026-11-05"' in page
+
+    status, headers, _ = alice.post(f'{path}/riksbanken', {'rate_date': '2026-11-05'})
+    assert status == 303 and headers['location'] == f'{path}?msg=rate'
+    facts = ok('get_item', {'id': sha(data)})['facts']
+    assert (facts['exchange_rate'], facts['amount_sek']) == ('10.5', '84.00')
+    assert facts['exchange_rate_source'] == 'Riksbanken 2026-11-05'
+    assert asked == ['https://api.riksbank.se/swea/v1/Observations/SEKUSDPMI/2026-10-26/2026-11-05']
+
+    # what Riksbanken cannot give is said on the page, and the facts stay as they were
+    monkeypatch.setattr(riksbank, '_get', lambda url: (429, {'Retry-After': '40'}, b''))
+    status, _, body = alice.post(f'{path}/riksbanken', {'rate_date': '2026-11-03'})
+    assert status == 422 and b'Try again in 40 seconds' in body
+    assert alice.post(f'{path}/riksbanken', {'rate_date': '2026-11-05'}, csrf=False)[0] == 403
+    assert ok('get_item', {'id': sha(data)})['facts']['exchange_rate'] == '10.5'
+
+    # the AI client can ask for the same rate; asking stores nothing
+    reply = ok('get_riksbank_rate', {'currency': 'usd', 'date': '2026-11-05'})
+    assert (reply['rate'], reply['source'], reply['unit']) == (
+        '10.5',
+        'Riksbanken 2026-11-05',
+        'SEK for 1 USD',
+    )
+    assert 'already in SEK' in refused('get_riksbank_rate', {'currency': 'SEK', 'date': '2026-11-05'})
+
+    # turned off: no button, no route, no answer from the tool
+    monkeypatch.setattr(riksbank, 'ENABLED', False)
+    assert button not in alice.get(path)[2].decode()
+    assert alice.post(f'{path}/riksbanken', {'rate_date': '2026-11-05'})[0] == 404
+    assert 'turned off' in refused('get_riksbank_rate', {'currency': 'USD', 'date': '2026-11-05'})
+    monkeypatch.setattr(riksbank, 'ENABLED', True)
+    ok('update_item', {'id': sha(data), 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
 def test_static_files_and_sign_out(alice):
     status, headers, _ = fetch('GET', '/static/app.css')
     assert status == 200 and headers['content-type'].startswith('text/css')
