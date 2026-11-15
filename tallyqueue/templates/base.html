@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}{% endblock %} · TallyQueue</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css?v={{ version }}">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/items">TallyQueue</a>
+  {% if session %}
+  <nav aria-label="Main">
+    <a href="/items">Items</a>
+    <a href="/accounts">Accounts</a>
+  </nav>
+  <form method="post" action="/logout" class="who">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <span>{{ session.user }}</span>
+    <button class="quiet">Sign out</button>
+  </form>
+  {% endif %}
+</header>
+<main>
+{% if flash %}<p class="flash" role="status">{{ flash }}</p>{% endif %}
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% block main %}{% endblock %}
+</main>
+<footer>
+  <p>TallyQueue is a helper, not a ledger. Every figure here is a proposal: check it before you book
+  it. Nothing here is accounting or tax advice.</p>
+  <p>Version {{ version }} · <a href="{{ source_url }}" rel="noopener noreferrer">Source code</a>
+  (AGPL-3.0-or-later)</p>
+</footer>
+</body>
+</html>

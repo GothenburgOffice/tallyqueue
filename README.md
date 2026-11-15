@@ -43,10 +43,184 @@ not be booked, such as a private purchase, is `skipped`.
 - It is not a service for other people's data. The list and the receipts are stored only for the
   users the operator has approved, at first only the owner.
 
-## Status
+## Run it
 
-The first version, an MCP server and a web page for the list, is being reviewed in the
-repository's first pull request. This page will describe how to run it once that is merged.
+You need Docker and an HTTPS reverse proxy (see [Behind Caddy](#behind-caddy)). Nothing else is
+installed on the host.
+
+```bash
+cp .env.example .env
+```
+
+1. In `.env`, set `PUBLIC_URL` to the address you will use, for example
+   `https://tallyqueue.example.com`.
+2. Make an access token for yourself. It is shown once: keep it in a password manager.
+
+   ```bash
+   docker compose -f compose.images.yaml run --rm app python -m tallyqueue token owner
+   ```
+
+   Put the `owner:…` pair it prints in `TALLYQUEUE_USERS` in `.env`. The server keeps only that
+   SHA-256, never the token. To approve another user later, add a pair, separated by a comma.
+   With `TALLYQUEUE_USERS` empty, nobody can sign in.
+3. Start it:
+
+   ```bash
+   docker compose -f compose.images.yaml up -d
+   ```
+
+`compose.images.yaml` pulls the published image `ghcr.io/gothenburgoffice/tallyqueue`. To build
+from a checkout instead, use `compose.yaml` (`docker compose up -d --build`).
+
+The container runs as a non-root user with a read-only file system and no capabilities. Items
+and receipts are in the `data` volume. The app listens on `127.0.0.1:3440` only, so it is
+reachable from the internet only through your reverse proxy.
+
+### Behind Caddy
+
+With a Caddy you already run on the host, add this site and reload Caddy:
+
+```
+tallyqueue.example.com {
+	request_body {
+		max_size 25MB
+	}
+	reverse_proxy 127.0.0.1:3440
+}
+```
+
+On a host with no reverse proxy, add `compose.caddy.yaml`. It runs Caddy in a second container,
+which gets the certificate for the host in `PUBLIC_URL` by itself; the name must point at the
+machine, and ports 80 and 443 must reach it. The app port is then not published at all.
+
+```bash
+docker compose -f compose.images.yaml -f compose.caddy.yaml up -d
+```
+
+### Settings
+
+| Variable | Meaning |
+|---|---|
+| `PUBLIC_URL` | The address users type: HTTPS, no path. Links, the Host and Origin checks and the Secure cookie come from it |
+| `TALLYQUEUE_USERS` | Approved users as `name:sha256` pairs, comma-separated |
+| `APP_PORT` | Port on the host that the reverse proxy forwards to (default 3440) |
+| `MAX_RECEIPT_BYTES` | Largest receipt file (default 15 MB) |
+| `SOURCE_URL` | Where users of your server get its source, if you run a changed version |
+| `TALLYQUEUE_IMAGE` | A pinned image for `compose.images.yaml`, such as a `sha-…` tag |
+
+## The web page
+
+Open `PUBLIC_URL` and sign in with your token. The list shows what is left to do; each item
+shows its receipt beside the facts and the proposed kontering, which you can correct. From there
+you mark an item prepped, booked (with the voucher number, and a tick that the receipt is
+attached to it in your bookkeeping service) or skipped (with a reason). You can also add a
+receipt file by hand, and delete an item.
+
+Under **Accounts** you paste the accounts you use, one per line (`1930 Företagskonto`). A SIE
+file can be pasted as it is; only its `#KONTO` lines are read. TallyQueue then warns when a
+kontering uses an account that is not in your list, and the AI client can ask for the list.
+
+The pages use no JavaScript.
+
+## Connect an AI client
+
+The MCP endpoint is `PUBLIC_URL/mcp` (streamable HTTP). The client sends your token in the
+header `X-API-Key` (or `Authorization: Bearer`).
+
+**Claude (Desktop app, claude.ai): a custom connector.** In Settings → Connectors → Add custom
+connector, give the URL `https://tallyqueue.example.com/mcp`, choose **No sign-in**, and add the
+request header `X-API-Key` with your token as its value.
+
+**Claude Code in a terminal:**
+
+```bash
+claude mcp add --transport http --scope user tallyqueue https://tallyqueue.example.com/mcp --header 'X-API-Key: ${TALLYQUEUE_TOKEN}'
+```
+
+The single quotes store the placeholder, and `claude` fills it in from the environment variable
+`TALLYQUEUE_TOKEN`.
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `add_item` | Adds a receipt or invoice file, with the facts read from it and a proposed kontering. The same file again changes nothing |
+| `list_items` | The list, by status (`todo` is new and prepped) or by text, with a count per status |
+| `get_item` | One item in full, with what is missing, warnings and its history |
+| `update_item` | Changes the facts, the proposed kontering, the status or the notes |
+| `list_accounts` | Your own list of accounts, if you have pasted one |
+
+The tool descriptions tell the client the rules: only facts that are on the document, amounts as
+text with two decimals, a kontering in SEK that balances, and booked only when you give the
+voucher number. A client can add and change items but not delete them.
+
+Then ask, for example: *"Go through my mail from October, find receipts and invoices for my
+business, and add each one to TallyQueue with its facts and a proposed kontering."*
+
+### How the file gets from the mail to TallyQueue
+
+The client has to send the file itself, and how depends on the client:
+
+- **A client with a shell**, such as Claude Code, saves the attachment and uploads the raw file.
+  The reply has the item's id, and `update_item` adds the facts.
+
+  ```bash
+  curl -fsS -X POST --data-binary @invoice.pdf -H "X-API-Key: $TALLYQUEUE_TOKEN" -H "X-Filename: invoice.pdf" https://tallyqueue.example.com/upload
+  ```
+
+- **A chat client without a shell** sends the file base64-encoded in `add_item`. That works for
+  a short text receipt; for a PDF of ordinary size it is slow and can fail. Add those by hand in
+  the web page.
+
+This path, from a real mail connector to TallyQueue, has not been tested yet.
+
+## Your data
+
+- Everything is in the `data` volume, as ordinary files: `users/<name>/items/<sha256>.json` (one
+  item each, readable as text), `users/<name>/receipts/<sha256>.<ext>` (the file as it arrived)
+  and `users/<name>/accounts.json`. Back up the volume to back up TallyQueue.
+- Accepted files: PDF, PNG, JPEG, WebP, GIF, and UTF-8 text such as a saved mail.
+- Nothing is encrypted at rest and nothing is sent anywhere. The server makes no outgoing
+  requests.
+- The receipts here are working copies. The archive that the law asks for is the one in your
+  bookkeeping service: an item is not `booked` until you tick that the receipt is attached there.
+
+## Development
+
+Docker is all the host needs. The dev stack serves `http://localhost:3440` from the source in
+this folder, restarts when it changes, and keeps its made-up data in its own volume. Its sign-in
+is public on purpose (user `dev`; the token is in `compose.dev.yaml`).
+
+```bash
+docker compose -f compose.yaml -f compose.dev.yaml up --build
+```
+
+The checks, as CI runs them:
+
+```bash
+docker compose -f compose.yaml -f compose.dev.yaml run --rm app sh -c "ruff format --check . && ruff check . && python -m pytest -q"
+```
+
+The tests start the real server on a local port and talk to it with a real MCP client and plain
+HTTP. `scripts/smoke.py` does the same against a running stack; CI runs it through Caddy and
+again after a restart. Opening the folder in VS Code offers the dev container
+(`.devcontainer/`), which adds git, `gh` and Claude Code's settings volume.
+
+### Dependencies
+
+`requirements.txt` lists what the code imports, at exact versions. `constraints.txt` pins
+everything those pull in, so each build installs the same set. After changing
+`requirements.txt`, renew the pins and run the checks:
+
+```bash
+sh scripts/renew-constraints.sh
+```
+
+## Not in this version
+
+Ideas for later, none of them promised: SIE 4I export, Excel or CSV export, cross-check figures
+for the VAT return and the NE appendix, reading a receipt back over MCP, and a stateless mode for
+people who are not approved users (import, work and export in one session, nothing stored).
 
 ## Your data stays out of this repository
 
@@ -64,4 +238,5 @@ of the License, or (at your option) any later version (`AGPL-3.0-or-later`). It 
 without any warranty. See [LICENSE](LICENSE).
 
 If you run a changed version as a network service, the license requires you to offer its users
-the source of your version.
+the source of your version. The pages link to the source in their footer; set `SOURCE_URL` to
+yours.

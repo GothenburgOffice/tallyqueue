@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block main %}
+<section class="narrow">
+  <h1>{{ title }}</h1>
+  <p>{{ text }}</p>
+  <p><a href="/items">Back to the list</a></p>
+</section>
+{% endblock %}

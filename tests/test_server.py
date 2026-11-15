@@ -1,0 +1,641 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""End-to-end tests: the real server app on a local port, a real MCP client and plain HTTP.
+
+Everything is made up: the users, the tokens, the companies, the amounts and the "receipt"
+files, which are built here in code. No real bookkeeping data belongs in this repository.
+"""
+
+import asyncio
+import base64
+import hashlib
+import http.client
+import json
+import os
+import re
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+import urllib.request
+import zlib
+
+import pytest
+
+ALICE, BOB = 'tq_made-up-test-token-for-alice-0123456789', 'tq_made-up-test-token-for-bob-9876543210'
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(('127.0.0.1', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+PORT = free_port()
+BASE = f'http://127.0.0.1:{PORT}'
+os.environ.update(
+    {
+        'DATA_DIR': tempfile.mkdtemp(prefix='tallyqueue-test-'),
+        'PUBLIC_URL': BASE,
+        'MAX_RECEIPT_BYTES': str(200 * 1024),
+        'TALLYQUEUE_USERS': ','.join(
+            f'{name}:{hashlib.sha256(token.encode()).hexdigest()}'
+            for name, token in (('alice', ALICE), ('bob', BOB))
+        ),
+    }
+)
+
+import uvicorn  # noqa: E402
+from mcp.client.session import ClientSession  # noqa: E402
+from mcp.client.streamable_http import streamable_http_client  # noqa: E402
+from mcp.shared._httpx_utils import create_mcp_http_client  # noqa: E402
+
+from tallyqueue import server, store  # noqa: E402
+
+_srv = uvicorn.Server(uvicorn.Config(server.build_app(), host='127.0.0.1', port=PORT, log_level='warning'))
+threading.Thread(target=_srv.run, daemon=True).start()
+for _ in range(100):
+    try:
+        urllib.request.urlopen(f'{BASE}/health', timeout=1)
+        break
+    except Exception:
+        time.sleep(0.1)
+
+
+# ---------------------------------------------------------------- made-up receipts
+def pdf(text: str) -> bytes:
+    return f'%PDF-1.4\n% made-up test receipt\n({text})\n%%EOF\n'.encode()
+
+
+def png() -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+
+    header = struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0)
+    return (
+        b'\x89PNG\r\n\x1a\n'
+        + chunk(b'IHDR', header)
+        + chunk(b'IDAT', zlib.compress(b'\x00\xff\xff\xff'))
+        + chunk(b'IEND', b'')
+    )
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+HOSTING = pdf('Exempel Hosting AB, invoice 1042, 1250.00 SEK')
+FACTS = {
+    'kind': 'invoice',
+    'date': '2026-10-03',
+    'counterparty': 'Exempel Hosting AB',
+    'description': 'Web hosting, October',
+    'amount': '1250.00',
+    'currency': 'SEK',
+    'vat_amount': '250.00',
+    'invoice_number': '1042',
+}
+BALANCED = {
+    'lines': [
+        {'account': '6230', 'debit': '1000.00'},
+        {'account': '2640', 'debit': '250.00'},
+        {'account': '2440', 'credit': '1250.00', 'text': 'Exempel Hosting AB 1042'},
+    ],
+    'vat_treatment': '25 % Swedish VAT',
+    'note': 'Made-up proposal for a test',
+}
+
+
+# ---------------------------------------------------------------- MCP client
+async def _call(tool, args, headers):
+    async with (
+        create_mcp_http_client(headers=headers) as client,
+        streamable_http_client(f'{BASE}/mcp', http_client=client) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        return await session.call_tool(tool, args)
+
+
+def call(tool, args=None, token=ALICE):
+    """(reply as a dict, error text). One of them is None."""
+    result = asyncio.run(_call(tool, args or {}, {'X-API-Key': token}))
+    text = result.content[0].text
+    return (None, text) if result.is_error else (json.loads(text), None)
+
+
+def ok(tool, args=None, token=ALICE):
+    reply, error = call(tool, args, token)
+    assert error is None, error
+    return reply
+
+
+def refused(tool, args=None, token=ALICE):
+    reply, error = call(tool, args, token)
+    assert error is not None, reply
+    return error
+
+
+# ---------------------------------------------------------------- plain HTTP
+def fetch(method, path, body=None, headers=None):
+    """(status, headers, body) without following redirects."""
+    conn = http.client.HTTPConnection('127.0.0.1', PORT, timeout=10)
+    conn.request(method, path, body=body, headers=headers or {})
+    response = conn.getresponse()
+    data = response.read()
+    conn.close()
+    return response.status, {k.lower(): v for k, v in response.getheaders()}, data
+
+
+class Browser:
+    """Just enough of a browser: keeps the session cookie and sends forms with their CSRF token."""
+
+    def __init__(self):
+        self.cookie = ''
+
+    def get(self, path):
+        return fetch('GET', path, headers={'Cookie': self.cookie})
+
+    def post(self, path, fields, origin=BASE, csrf=True):
+        fields = dict(fields)
+        if csrf:
+            fields.setdefault('csrf', self.csrf())
+        body = urllib.parse.urlencode(fields)
+        headers = {'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': self.cookie}
+        if origin:
+            headers['Origin'] = origin
+        status, reply_headers, data = fetch('POST', path, body, headers)
+        if 'set-cookie' in reply_headers:
+            self.cookie = reply_headers['set-cookie'].split(';')[0]
+        return status, reply_headers, data
+
+    def csrf(self):
+        match = re.search(rb'name="csrf" value="([^"]+)"', self.get('/accounts')[2])
+        return match.group(1).decode() if match else ''
+
+    def sign_in(self, token):
+        return self.post('/login', {'token': token}, csrf=False)
+
+    def upload(self, filename, data):
+        boundary = 'made-up-boundary-7d1'
+        parts = [
+            f'--{boundary}\r\nContent-Disposition: form-data; name="csrf"\r\n\r\n{self.csrf()}\r\n'.encode(),
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            'Content-Type: application/octet-stream\r\n\r\n'.encode()
+            + data
+            + b'\r\n',
+            f'--{boundary}--\r\n'.encode(),
+        ]
+        headers = {
+            'Content-Type': f'multipart/form-data; boundary={boundary}',
+            'Cookie': self.cookie,
+            'Origin': BASE,
+        }
+        return fetch('POST', '/items', b''.join(parts), headers)
+
+
+@pytest.fixture(scope='module')
+def alice():
+    browser = Browser()
+    status, headers, _ = browser.sign_in(ALICE)
+    assert status == 303 and headers['location'] == '/items'
+    return browser
+
+
+@pytest.fixture(scope='module')
+def hosting():
+    """The made-up hosting invoice, added over MCP with facts and a kontering."""
+    reply = ok(
+        'add_item',
+        {
+            'file_base64': b64(HOSTING),
+            'filename': 'exempel-hosting-1042.pdf',
+            'source': 'Mail from billing@example.test, 2026-10-03',
+            'facts': FACTS,
+            'kontering': BALANCED,
+        },
+    )
+    assert reply['created'] is True
+    return reply['item']
+
+
+# ---------------------------------------------------------------- access
+def test_health_is_open_and_says_nothing_private():
+    status, _, body = fetch('GET', '/health')
+    assert status == 200 and json.loads(body)['status'] == 'ok'
+
+
+@pytest.mark.parametrize('headers', [{}, {'X-API-Key': 'tq_wrong'}, {'X-API-Key': '${TALLYQUEUE_TOKEN}'}])
+def test_mcp_refuses_requests_without_an_approved_token(headers):
+    body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
+    status, _, reply = fetch('POST', '/mcp', body, {'Content-Type': 'application/json', **headers})
+    assert status == 401 and b'unauthorized' in reply
+
+
+def test_bearer_token_works_too():
+    result = asyncio.run(_call('list_items', {}, {'Authorization': f'Bearer {BOB}'}))
+    assert not result.is_error
+
+
+def test_requests_for_another_host_name_are_refused():
+    status, _, _ = fetch('GET', '/health', headers={'Host': 'attacker.example'})
+    assert status == 421
+
+
+def test_only_full_length_tokens_are_accepted():
+    # Nothing slows down guessing, so a short hand-made token must never work, even when its
+    # SHA-256 is listed in TALLYQUEUE_USERS.
+    from tallyqueue import auth
+
+    short = 'tq_hunter2'
+    auth.USERS['mallory'] = hashlib.sha256(short.encode()).hexdigest()
+    try:
+        assert auth.user_for_token(short) is None
+        assert fetch('POST', '/upload', png(), {'X-API-Key': short})[0] == 401
+    finally:
+        del auth.USERS['mallory']
+    assert auth.user_for_token(ALICE) == 'alice' and auth.user_for_token(ALICE[3:]) is None
+    assert len(auth.new_token()) >= auth.MIN_TOKEN_LENGTH
+
+
+def test_the_token_command_prints_a_token_and_its_pair():
+    env = {k: v for k, v in os.environ.items() if k != 'TALLYQUEUE_USERS'}
+    out = subprocess.run(
+        [sys.executable, '-m', 'tallyqueue', 'token', 'carol'],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    ).stdout
+    token = re.search(r'^\s+(tq_\S+)$', out, re.M).group(1)
+    assert f'carol:{hashlib.sha256(token.encode()).hexdigest()}' in out
+
+
+# ---------------------------------------------------------------- MCP tools
+def test_add_item_stores_the_receipt_under_its_checksum(hosting):
+    assert hosting['id'] == sha(HOSTING)
+    assert hosting['status'] == 'new' and hosting['facts'] == FACTS
+    assert hosting['kontering_totals'] == {'debit': '1250.00', 'credit': '1250.00', 'balanced': True}
+    assert hosting['web_page'] == f'{BASE}/items/{sha(HOSTING)}'
+    folder = os.path.join(store.DATA_DIR, 'users', 'alice')
+    with open(os.path.join(folder, 'receipts', f'{sha(HOSTING)}.pdf'), 'rb') as f:
+        assert f.read() == HOSTING
+    assert os.path.exists(os.path.join(folder, 'items', f'{sha(HOSTING)}.json'))
+
+
+def test_adding_the_same_file_again_changes_nothing(hosting):
+    reply = ok(
+        'add_item',
+        {'file_base64': b64(HOSTING), 'facts': {'amount': '9999.00', 'counterparty': 'Someone Else'}},
+    )
+    assert reply['created'] is False and 'already in the list' in reply['note']
+    assert reply['item']['facts'] == FACTS
+    assert ok('list_items', {'status': 'all'})['counts']['all'] == 1
+
+
+def test_add_item_refuses_bad_input():
+    assert 'not valid base64' in refused('add_item', {'file_base64': 'not base64!'})
+    assert 'not accepted' in refused('add_item', {'file_base64': b64(b'PK\x03\x04\x00\x00zip')})
+    assert 'more than two decimals' in refused(
+        'add_item', {'file_base64': b64(pdf('never stored')), 'facts': {'amount': '12.345'}}
+    )
+    assert (
+        ok('list_items', {'status': 'all'})['counts']['all'] <= 1
+    )  # nothing was stored by the refused calls
+
+
+def test_users_never_see_each_other(hosting):
+    assert ok('list_items', {'status': 'all'}, BOB)['items'] == []
+    assert 'No item' in refused('get_item', {'id': hosting['id']}, BOB)
+    assert 'No item' in refused('update_item', {'id': hosting['id'], 'notes': 'mine now'}, BOB)
+
+
+def test_list_items_filters_and_counts(hosting):
+    reply = ok('list_items')
+    assert reply['counts']['todo'] == reply['counts']['new'] + reply['counts']['prepped']
+    row = next(r for r in reply['items'] if r['id'] == hosting['id'][:12])
+    assert row['counterparty'] == 'Exempel Hosting AB' and row['amount'] == '1250.00'
+    assert row['kontering'] == 'D 6230 1000.00, D 2640 250.00, C 2440 1250.00'
+    assert [r['id'] for r in ok('list_items', {'text': 'hosting ab'})['items']] == [row['id']]
+    assert ok('list_items', {'text': 'no such thing'})['items'] == []
+    assert ok('list_items', {'status': 'booked'})['items'] == []
+
+
+def test_the_status_flow_new_prepped_booked():
+    data = pdf('Exempel Domain Registry, receipt 77, 149.00 SEK')
+    item = ok('add_item', {'file_base64': b64(data), 'filename': 'domain.pdf'})['item']
+    ref = item['id'][:10]  # the start of an id is enough
+    assert item['missing_for_prepped'] == [
+        'Missing facts: date, amount, currency',
+        'The kontering needs at least two lines',
+    ]
+    assert 'Cannot be prepped' in refused('update_item', {'id': ref, 'status': 'prepped'})
+
+    facts = {
+        'date': '2026-09-14',
+        'amount': '149.00',
+        'currency': 'SEK',
+        'counterparty': 'Exempel Domain Registry',
+    }
+    lopsided = {'lines': [{'account': '6230', 'debit': '119.20'}, {'account': '1930', 'credit': '149.00'}]}
+    item = ok('update_item', {'id': ref, 'facts': facts, 'kontering': lopsided})
+    assert item['kontering_totals']['balanced'] is False and any(
+        'does not balance' in w for w in item['warnings']
+    )
+    assert 'does not balance' in refused('update_item', {'id': ref, 'status': 'prepped'})
+
+    balanced = {
+        'lines': [*lopsided['lines'][:1], {'account': '2640', 'debit': '29.80'}, lopsided['lines'][1]]
+    }
+    item = ok('update_item', {'id': ref, 'kontering': balanced, 'status': 'prepped'})
+    assert item['status'] == 'prepped' and item['facts']['counterparty'] == 'Exempel Domain Registry'
+
+    # a prepped item stays complete: an unbalanced kontering is refused, and nothing is saved
+    assert 'Set the status back to new' in refused('update_item', {'id': ref, 'kontering': lopsided})
+    assert ok('get_item', {'id': ref})['kontering_totals']['balanced'] is True
+
+    assert 'voucher number' in refused('update_item', {'id': ref, 'status': 'booked'})
+    assert 'receipt is attached' in refused('update_item', {'id': ref, 'status': 'booked', 'voucher': 'A 7'})
+    item = ok('update_item', {'id': ref, 'status': 'booked', 'voucher': 'A 7', 'receipt_attached': True})
+    assert item['status'] == 'booked'
+    assert item['booking'] == {'voucher': 'A 7', 'receipt_attached': True, 'date': store.today()}
+    assert 'voucher number' in refused('update_item', {'id': ref, 'voucher': ''})  # booked keeps its voucher
+
+    history = [event['what'] for event in ok('get_item', {'id': ref})['history']]
+    assert history[0] == 'added' and history[-1].endswith('status: prepped to booked')
+    assert ok('list_items', {'status': 'booked'})['items'][0]['voucher'] == 'A 7'
+
+
+def test_skipped_needs_a_reason_and_can_be_reopened():
+    item = ok(
+        'add_item',
+        {'file_base64': b64(b'Tack for ditt kop! Privat lunch 129 kr (made up)'), 'filename': 'mail.txt'},
+    )['item']
+    assert item['receipt']['media_type'] == 'text/plain'
+    assert 'Say why' in refused('update_item', {'id': item['id'], 'status': 'skipped'})
+    item = ok('update_item', {'id': item['id'], 'status': 'skipped', 'skip_reason': 'Private purchase'})
+    assert item['status'] == 'skipped' and item['skip_reason'] == 'Private purchase'
+    assert ok('update_item', {'id': item['id'], 'status': 'new'})['status'] == 'new'
+
+
+def test_facts_can_be_cleared_and_unknown_fields_are_refused(hosting):
+    item = ok('update_item', {'id': hosting['id'], 'facts': {'description': ''}})
+    assert 'description' not in item['facts'] and item['facts']['amount'] == '1250.00'
+    ok('update_item', {'id': hosting['id'], 'facts': {'description': FACTS['description']}})
+    reply, error = call('update_item', {'id': hosting['id'], 'facts': {'colour': 'red'}})
+    assert error is not None and reply is None
+
+
+# ---------------------------------------------------------------- upload
+def test_upload_takes_raw_bytes_and_is_idempotent():
+    data = png()
+    headers = {'X-API-Key': ALICE, 'X-Filename': 'kvitto%20foto.png'}
+    status, _, body = fetch('POST', '/upload', data, headers)
+    reply = json.loads(body)
+    assert status == 201 and reply['created'] is True and reply['id'] == sha(data)
+    assert reply['receipt'] == {'filename': 'kvitto foto.png', 'media_type': 'image/png', 'bytes': len(data)}
+    status, _, body = fetch('POST', '/upload', data, headers)
+    assert status == 200 and json.loads(body)['created'] is False
+    assert ok('get_item', {'id': sha(data)})['history'][0]['via'] == 'upload'
+
+
+def test_upload_refuses_strangers_unknown_types_and_large_files():
+    assert fetch('POST', '/upload', png())[0] == 401
+    assert fetch('POST', '/upload', b'MZ\x90\x00\x03\x00\x00\x00', {'X-API-Key': ALICE})[0] == 400
+    assert fetch('POST', '/upload', b'', {'X-API-Key': ALICE})[0] == 400
+    assert fetch('POST', '/upload', b'%PDF-1.4' + b'x' * 210 * 1024, {'X-API-Key': ALICE})[0] == 413
+
+
+# ---------------------------------------------------------------- web page
+def test_pages_need_a_sign_in():
+    for path in ('/items', f'/items/{sha(HOSTING)}', f'/receipts/{sha(HOSTING)}', '/accounts'):
+        status, headers, _ = fetch('GET', path)
+        assert status == 303 and headers['location'].startswith('/login?next=%2F'), path
+    assert fetch('GET', '/')[1]['location'] == '/login'
+    assert fetch('GET', '/login')[0] == 200
+
+
+def test_sign_in_refuses_a_wrong_token_and_never_redirects_off_site():
+    browser = Browser()
+    status, _, body = browser.sign_in('tq_wrong')
+    assert status == 401 and b'not approved' in body and not browser.cookie
+    status, headers, _ = browser.post('/login', {'token': ALICE, 'next': '//attacker.example/x'}, csrf=False)
+    assert status == 303 and headers['location'] == '/items'
+    status, headers, _ = Browser().post('/login', {'token': ALICE, 'next': '/accounts'}, csrf=False)
+    assert headers['location'] == '/accounts'
+
+
+def test_the_session_cookie_is_http_only_and_same_site():
+    conn = http.client.HTTPConnection('127.0.0.1', PORT, timeout=10)
+    body = urllib.parse.urlencode({'token': ALICE})
+    conn.request(
+        'POST', '/login', body, {'Content-Type': 'application/x-www-form-urlencoded', 'Origin': BASE}
+    )
+    cookie = conn.getresponse().getheader('set-cookie').lower()
+    conn.close()
+    assert 'httponly' in cookie and 'samesite=lax' in cookie and 'path=/' in cookie
+
+
+def test_pages_carry_the_security_headers(alice):
+    status, headers, body = alice.get('/items')
+    assert status == 200
+    policy = headers['content-security-policy']
+    assert "default-src 'none'" in policy and 'script' not in policy and "frame-ancestors 'none'" in policy
+    assert headers['x-content-type-options'] == 'nosniff' and headers['x-frame-options'] == 'DENY'
+    assert headers['referrer-policy'] == 'same-origin' and headers['cache-control'] == 'no-store'
+    assert b'<script' not in body
+    assert b'not a ledger' in body and b'AGPL-3.0-or-later' in body
+
+
+def test_the_list_and_the_item_page_show_the_item(alice, hosting):
+    _, _, body = alice.get('/items?status=all')
+    assert b'Exempel Hosting AB' in body and f'/items/{hosting["id"]}'.encode() in body
+    status, headers, _ = alice.get(f'/items/{hosting["id"][:8]}')
+    assert status == 303 and headers['location'] == f'/items/{hosting["id"]}'
+    status, _, body = alice.get(f'/items/{hosting["id"]}')
+    assert status == 200 and b'value="1250.00"' in body and b'value="6230"' in body and b'Balances' in body
+    assert f'<iframe src="/receipts/{hosting["id"]}"'.encode() in body
+    assert alice.get('/items/' + 'f' * 64)[0] == 404
+
+
+def test_forms_from_elsewhere_or_without_the_csrf_token_are_refused(alice, hosting):
+    path = f'/items/{hosting["id"]}/notes'
+    assert alice.post(path, {'notes': 'x'}, origin='https://attacker.example')[0] == 403
+    assert alice.post(path, {'notes': 'x'}, csrf=False)[0] == 403
+    assert alice.post(path, {'notes': 'x', 'csrf': 'made-up'})[0] == 403
+    assert ok('get_item', {'id': hosting['id']})['notes'] is None
+    status, headers, _ = alice.post(path, {'notes': 'Checked against the made-up bank statement'})
+    assert status == 303 and headers['location'].endswith('?msg=saved')
+    assert ok('get_item', {'id': hosting['id']})['notes'] == 'Checked against the made-up bank statement'
+
+
+def test_text_from_a_receipt_is_never_markup(alice):
+    nasty = '<script>alert(1)</script>'
+    item = ok(
+        'add_item',
+        {'file_base64': b64(pdf('made-up XSS probe')), 'facts': {'counterparty': nasty}, 'notes': nasty},
+    )['item']
+    for path in ('/items?status=all', f'/items/{item["id"]}'):
+        body = alice.get(path)[2]
+        assert nasty.encode() not in body and b'&lt;script&gt;alert(1)&lt;/script&gt;' in body
+    ok('update_item', {'id': item['id'], 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
+def test_editing_through_the_web_page(alice):
+    data = pdf('Exempel Kontorsvaror AB, receipt 5512, 399.00 SEK')
+    status, headers, _ = alice.upload('kontorsvaror.pdf', data)
+    path = f'/items/{sha(data)}'
+    assert status == 303 and headers['location'] == f'{path}?msg=added'
+    assert alice.upload('same-file-other-name.pdf', data)[1]['location'] == f'{path}?msg=duplicate'
+
+    # a slip in a fact is reported, and what was typed is still in the form
+    form = dict.fromkeys(
+        (
+            'kind',
+            'counterparty',
+            'description',
+            'vat_amount',
+            'amount_sek',
+            'invoice_number',
+            'due_date',
+            'payment_date',
+        ),
+        '',
+    )
+    form |= {
+        'date': '2026-11-02',
+        'amount': '399,00',
+        'currency': 'kr',
+        'counterparty': 'Exempel Kontorsvaror AB',
+    }
+    status, _, body = alice.post(f'{path}/facts', form)
+    assert status == 422 and b'not a three-letter code' in body and b'value="399,00"' in body
+    assert alice.post(f'{path}/facts', form | {'currency': 'sek'})[0] == 303
+    assert ok('get_item', {'id': sha(data)})['facts'] == {
+        'date': '2026-11-02', 'counterparty': 'Exempel Kontorsvaror AB', 'amount': '399.00', 'currency': 'SEK'
+    }  # fmt: skip
+
+    lines = {'account_0': '6110', 'debit_0': '319,20', 'credit_0': '', 'text_0': 'Paper',
+             'account_1': '2640', 'debit_1': '79,80', 'credit_1': '', 'text_1': '',
+             'account_2': '1930', 'debit_2': '', 'credit_2': '399', 'text_2': '',
+             'account_3': '', 'debit_3': '', 'credit_3': '', 'text_3': '',
+             'vat_treatment': '25 % Swedish VAT', 'note': ''}  # fmt: skip
+    assert alice.post(f'{path}/kontering', lines)[0] == 303
+    item = ok('get_item', {'id': sha(data)})
+    assert item['kontering_totals'] == {'debit': '399.00', 'credit': '399.00', 'balanced': True}
+    assert item['history'][-1] == {'at': item['updated'], 'by': 'alice', 'via': 'web', 'what': 'kontering'}
+
+    assert alice.post(f'{path}/status', {'to': 'prepped'})[0] == 303
+    status, _, body = alice.post(f'{path}/kontering', lines | {'credit_2': '400'})
+    assert status == 422 and b'does not balance' in body and b'value="400"' in body
+    status, _, body = alice.post(f'{path}/status', {'to': 'booked', 'voucher': 'A 31'})
+    assert status == 422 and b'receipt is attached' in body
+    assert (
+        alice.post(f'{path}/status', {'to': 'booked', 'voucher': 'A 31', 'receipt_attached': 'on'})[0] == 303
+    )
+    assert ok('get_item', {'id': sha(data)})['booking']['voucher'] == 'A 31'
+    assert b'voucher <strong>A 31</strong>' in alice.get(path)[2]
+
+    assert alice.post(f'{path}/delete', {})[0] == 422
+    status, headers, _ = alice.post(f'{path}/delete', {'confirm': 'on'})
+    assert status == 303 and headers['location'] == '/items?msg=deleted'
+    assert alice.get(path)[0] == 404
+    assert not os.path.exists(os.path.join(store.DATA_DIR, 'users', 'alice', 'receipts', f'{sha(data)}.pdf'))
+
+
+def test_receipts_are_served_to_their_owner_only(alice, hosting):
+    status, headers, body = alice.get(f'/receipts/{hosting["id"]}')
+    assert status == 200 and body == HOSTING and headers['content-type'] == 'application/pdf'
+    assert headers['x-content-type-options'] == 'nosniff' and headers['x-frame-options'] == 'SAMEORIGIN'
+    assert "frame-ancestors 'self'" in headers['content-security-policy']
+    assert headers['content-disposition'].startswith('inline')
+    assert alice.get(f'/receipts/{hosting["id"]}?download')[1]['content-disposition'].startswith('attachment')
+    bob = Browser()
+    bob.sign_in(BOB)
+    assert bob.get(f'/receipts/{hosting["id"]}')[0] == 404
+    assert bob.get(f'/items/{hosting["id"]}')[0] == 404
+
+
+def test_amounts_are_text_and_a_json_number_is_refused(hosting):
+    for amount in (1250.5, 1250):
+        reply, error = call('update_item', {'id': hosting['id'], 'facts': {'amount': amount}})
+        assert reply is None and 'amount' in error and 'string' in error, error
+    lines = [{'account': '6230', 'debit': 1250.0}, {'account': '2440', 'credit': '1250.00'}]
+    reply, error = call('update_item', {'id': hosting['id'], 'kontering': {'lines': lines}})
+    assert reply is None and 'debit' in error
+    item = ok('get_item', {'id': hosting['id']})
+    assert item['facts']['amount'] == '1250.00' and len(item['kontering']['lines']) == 3
+
+
+def test_a_web_upload_may_be_as_large_as_the_receipt_limit(alice):
+    # The form parser limits the size of text fields, not of the file part: a receipt well over
+    # that field limit is stored, and one over MAX_RECEIPT_BYTES is refused before it is read.
+    big = pdf('made-up large receipt ' + 'x' * 150 * 1024)
+    assert 64 * 1024 < len(big) < store.MAX_RECEIPT_BYTES
+    status, headers, _ = alice.upload('large.pdf', big)
+    assert status == 303 and headers['location'] == f'/items/{sha(big)}?msg=added'
+    assert alice.get(f'/receipts/{sha(big)}')[2] == big
+    too_big = pdf('never stored ' + 'x' * (store.MAX_RECEIPT_BYTES + 70 * 1024))
+    assert alice.upload('too-large.pdf', too_big)[0] == 413
+    assert alice.get(f'/items/{sha(too_big)}')[0] == 404
+    ok('update_item', {'id': sha(big), 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
+def test_an_svg_is_stored_as_text_and_never_served_as_an_image(alice):
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><text>made up</text></svg>'
+    for name in ('drawing.svg', 'renamed.txt'):
+        assert alice.upload(name, svg)[0] == 303
+    item = ok('get_item', {'id': sha(svg)})
+    assert item['receipt']['media_type'] == 'text/plain'
+    assert os.path.exists(os.path.join(store.DATA_DIR, 'users', 'alice', 'receipts', f'{sha(svg)}.txt'))
+    status, headers, body = alice.get(f'/receipts/{sha(svg)}')
+    assert status == 200 and body == svg
+    assert headers['content-type'] == 'text/plain; charset=utf-8'
+    assert 'sandbox' in headers['content-security-policy'] and headers['x-content-type-options'] == 'nosniff'
+    assert b'<img src' not in alice.get(f'/items/{sha(svg)}')[2]
+    ok('update_item', {'id': sha(svg), 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
+def test_an_html_receipt_is_shown_as_text_never_as_a_page(alice):
+    page = b'<html><body><script>alert(1)</script>Kvitto 59 kr (made up)</body></html>'
+    assert alice.upload('mail.html', page)[0] == 303
+    status, headers, body = alice.get(f'/receipts/{sha(page)}')
+    assert status == 200 and body == page
+    assert (
+        headers['content-type'].startswith('text/plain') and 'sandbox' in headers['content-security-policy']
+    )
+    ok('update_item', {'id': sha(page), 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
+def test_the_users_own_accounts(alice, hosting):
+    assert ok('list_accounts') == {'count': 0, 'accounts': []}
+    status, _, body = alice.post('/accounts', {'accounts': '1930 Bank\nnot an account line\n'})
+    assert status == 422 and b'Line 2' in body and b'not an account line' in body
+    source = '#KONTO 1930 "Företagskonto"\n2440 Leverantörsskulder\n2640 Ingående moms\n'
+    assert alice.post('/accounts', {'accounts': source})[1]['location'] == '/accounts?msg=accounts'
+    assert ok('list_accounts')['accounts'][0] == {'account': '1930', 'name': 'Företagskonto'}
+    assert ok('list_accounts', token=BOB)['count'] == 0
+    warnings = ok('get_item', {'id': hosting['id']})['warnings']
+    assert 'Not in your list of accounts: 6230' in warnings
+    assert 'Företagskonto'.encode() in alice.get('/accounts')[2]
+
+
+def test_static_files_and_sign_out(alice):
+    status, headers, _ = fetch('GET', '/static/app.css')
+    assert status == 200 and headers['content-type'].startswith('text/css')
+    assert fetch('GET', '/static/..%2Fweb.py')[0] == 404 and fetch('GET', '/static/secret.txt')[0] == 404
+    assert b'Disallow: /' in fetch('GET', '/robots.txt')[2]
+    browser = Browser()
+    browser.sign_in(ALICE)
+    assert browser.get('/items')[0] == 200
+    assert browser.post('/logout', {})[0] == 303
+    assert browser.get('/items')[0] == 303

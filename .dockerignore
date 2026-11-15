@@ -1,0 +1,34 @@
+# Not needed in any image.
+.git
+.github
+.devcontainer
+*.code-workspace
+
+# Everything .gitignore keeps out of commits stays out of images too. Without this, the
+# Dockerfile's COPY lines would put a local receipt or export into an image layer.
+# A .gitignore pattern without a slash matches at any depth; here that takes a leading **/.
+# tests/test_repo.py compares the two files.
+**/data
+**/.localdata
+**/receipts
+**/exports
+**/*.pdf
+**/*.eml
+**/*.msg
+**/*.sie
+**/*.si
+**/*.se
+**/*.xlsx
+**/*.xls
+**/*.csv
+**/.env*
+!.env.example
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/notes
+**/CLAUDE.local.md
+.claude/settings.local.json
+**/*.log

@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}{{ item.facts.counterparty or item.receipt.filename }}{% endblock %}
+{% block main %}
+<p class="back"><a href="/items">← All items</a></p>
+<h1>{{ item.facts.counterparty or item.receipt.filename }}
+  <span class="status {{ item.status }}">{{ item.status }}</span></h1>
+<p class="sub">Item {{ item.id[:12] }} · added {{ item.created[:10] }}{% if item.source %} · from: {{ item.source }}{% endif %}</p>
+
+{% if warnings %}
+<ul class="warnings">
+  {% for warning in warnings %}<li>{{ warning }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+<div class="split">
+<section class="receipt" aria-label="Receipt">
+  {% if not has_receipt %}
+  <p class="empty">The receipt file for this item is missing.</p>
+  {% elif preview == 'image' %}
+  <a href="/receipts/{{ item.id }}"><img src="/receipts/{{ item.id }}" alt="The receipt, {{ item.receipt.filename }}"></a>
+  {% else %}
+  <iframe src="/receipts/{{ item.id }}" title="The receipt, {{ item.receipt.filename }}"></iframe>
+  {% endif %}
+  {% if has_receipt %}
+  <p class="sub">{{ item.receipt.filename }} · {{ (item.receipt.bytes / 1024)|round(0, 'ceil')|int }} kB ·
+    <a href="/receipts/{{ item.id }}" target="_blank" rel="noopener">Open</a> ·
+    <a href="/receipts/{{ item.id }}?download">Download</a></p>
+  <p class="hint">A working copy. The archived receipt belongs in your bookkeeping service.</p>
+  {% endif %}
+</section>
+
+<div class="forms">
+<section class="panel">
+  <h2>Facts</h2>
+  <form method="post" action="/items/{{ item.id }}/facts" class="grid">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    {% for name, label in fact_labels.items() %}
+    <label for="f-{{ name }}">{{ label }}</label>
+    {% if name == 'kind' %}
+    <select id="f-kind" name="kind">
+      <option value="">–</option>
+      {% for kind in kinds %}<option value="{{ kind }}"{% if facts.kind == kind %} selected{% endif %}>{{ kind|replace('_', ' ') }}</option>{% endfor %}
+    </select>
+    {% elif name in ('date', 'due_date', 'payment_date') %}
+    <input id="f-{{ name }}" name="{{ name }}" type="date" value="{{ facts[name] or '' }}">
+    {% elif name in ('amount', 'vat_amount', 'amount_sek') %}
+    <input id="f-{{ name }}" name="{{ name }}" inputmode="decimal" class="num" value="{{ facts[name] or '' }}" autocomplete="off">
+    {% elif name == 'currency' %}
+    <input id="f-currency" name="currency" maxlength="3" size="4" class="short" value="{{ facts.currency or '' }}" placeholder="SEK" autocomplete="off">
+    {% else %}
+    <input id="f-{{ name }}" name="{{ name }}" value="{{ facts[name] or '' }}" autocomplete="off">
+    {% endif %}
+    {% endfor %}
+    <div class="actions"><button>Save facts</button></div>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Kontering <span class="sub">proposal, in SEK</span></h2>
+  <form method="post" action="/items/{{ item.id }}/kontering">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <div class="scroll">
+    <table class="lines">
+      <thead>
+        <tr><th scope="col">Account</th><th scope="col" class="num">Debit</th><th scope="col" class="num">Credit</th><th scope="col">Text</th></tr>
+      </thead>
+      <tbody>
+        {% for line in lines %}
+        <tr>
+          <td><input name="account_{{ loop.index0 }}" value="{{ line.account or '' }}" inputmode="numeric" maxlength="6" size="6" list="accounts" aria-label="Account, line {{ loop.index }}" autocomplete="off">
+            {% if line.account and account_names.get(line.account) %}<div class="sub">{{ account_names[line.account] }}</div>{% endif %}</td>
+          <td><input name="debit_{{ loop.index0 }}" value="{{ line.debit or '' }}" inputmode="decimal" class="num" size="10" aria-label="Debit, line {{ loop.index }}" autocomplete="off"></td>
+          <td><input name="credit_{{ loop.index0 }}" value="{{ line.credit or '' }}" inputmode="decimal" class="num" size="10" aria-label="Credit, line {{ loop.index }}" autocomplete="off"></td>
+          <td><input name="text_{{ loop.index0 }}" value="{{ line.text or '' }}" aria-label="Text, line {{ loop.index }}" autocomplete="off"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr class="{{ 'balanced' if totals.balanced else 'unbalanced' }}">
+          <th scope="row">Saved total</th>
+          <td class="num">{{ totals.debit }}</td>
+          <td class="num">{{ totals.credit }}</td>
+          <td>{{ 'Balances' if totals.balanced else 'Does not balance' }}</td>
+        </tr>
+      </tfoot>
+    </table>
+    </div>
+    <datalist id="accounts">
+      {% for account in accounts %}<option value="{{ account.account }}">{{ account.account }} {{ account.name }}</option>{% endfor %}
+    </datalist>
+    <div class="grid">
+      <label for="k-vat">VAT treatment</label>
+      <input id="k-vat" name="vat_treatment" value="{{ vat_treatment }}" maxlength="200" autocomplete="off">
+      <label for="k-note">Note on the proposal</label>
+      <textarea id="k-note" name="note" rows="2" maxlength="1000">{{ kontering_note }}</textarea>
+      <div class="actions"><button>Save kontering</button></div>
+    </div>
+  </form>
+  <p class="hint">Empty rows are ignored; save to get more rows. {% if not accounts %}You have not
+  added your <a href="/accounts">list of accounts</a>, so account numbers are not checked.{% endif %}</p>
+</section>
+
+<section class="panel">
+  <h2>Status</h2>
+  {% if item.status == 'booked' %}
+  <p>Booked {{ item.booking.date }} as voucher <strong>{{ item.booking.voucher }}</strong>, with the receipt
+  attached in the bookkeeping service.</p>
+  {% elif item.status == 'skipped' %}
+  <p>Skipped: {{ item.skip_reason }}</p>
+  {% endif %}
+
+  {% if item.status == 'new' %}
+  <form method="post" action="/items/{{ item.id }}/status" class="row">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <input type="hidden" name="to" value="prepped">
+    <button{% if prep_problems %} disabled{% endif %}>Mark as prepped</button>
+    <span class="hint">{% if prep_problems %}{{ prep_problems|join('. ') }}.{% else %}Checked and ready to book.{% endif %}</span>
+  </form>
+  {% endif %}
+
+  {% if item.status in ('new', 'prepped') %}
+  <form method="post" action="/items/{{ item.id }}/status" class="stack boxed">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <input type="hidden" name="to" value="booked">
+    <label for="voucher">Voucher number in your bookkeeping service (verifikationsnummer)</label>
+    <input id="voucher" name="voucher" maxlength="50" class="short" value="{{ (item.booking.voucher if item.booking else '') or '' }}" placeholder="A 12" autocomplete="off">
+    <label class="check"><input type="checkbox" name="receipt_attached"> The receipt is attached to that voucher there</label>
+    <div><button>Mark as booked</button></div>
+  </form>
+  <form method="post" action="/items/{{ item.id }}/status" class="stack boxed">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <input type="hidden" name="to" value="skipped">
+    <label for="skip_reason">Why it should not be booked</label>
+    <input id="skip_reason" name="skip_reason" maxlength="300" value="{{ item.skip_reason or '' }}" placeholder="Private purchase" autocomplete="off">
+    <div><button class="quiet">Skip</button></div>
+  </form>
+  {% endif %}
+
+  {% if item.status != 'new' %}
+  <form method="post" action="/items/{{ item.id }}/status" class="row">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <input type="hidden" name="to" value="new">
+    <button class="quiet">Back to new</button>
+    <span class="hint">{% if item.status == 'prepped' %}To save unfinished changes.{% else %}Reopens the item. Nothing is removed.{% endif %}</span>
+  </form>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Notes</h2>
+  <form method="post" action="/items/{{ item.id }}/notes" class="stack">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <label for="notes" class="hidden">Notes</label>
+    <textarea id="notes" name="notes" rows="3" maxlength="4000">{{ item.notes or '' }}</textarea>
+    <div><button class="quiet">Save notes</button></div>
+  </form>
+</section>
+
+<details class="panel">
+  <summary>History ({{ item.history|length }})</summary>
+  <ul class="history">
+    {% for event in item.history|reverse %}
+    <li><span class="nowrap">{{ event.at|replace('T', ' ')|replace('Z', ' UTC') }}</span> · {{ event.by }} via {{ event.via }} · {{ event.what }}</li>
+    {% endfor %}
+  </ul>
+</details>
+
+<details class="panel">
+  <summary>Delete this item</summary>
+  <form method="post" action="/items/{{ item.id }}/delete" class="stack">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <p class="hint">Deletes the item and its receipt file from TallyQueue. If the receipt is still
+    in your mail, the next scan adds it again: to keep it out of the list, skip it instead.</p>
+    <label class="check"><input type="checkbox" name="confirm"> Delete the item and its receipt file</label>
+    <div><button class="danger">Delete</button></div>
+  </form>
+</details>
+</div>
+</div>
+{% endblock %}

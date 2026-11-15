@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Accounts{% endblock %}
+{% block main %}
+<section class="narrow wide">
+  <h1>Your accounts</h1>
+  <p>The accounts you use, so that a proposed kontering can be checked against them and the AI
+  client proposes accounts you actually have. TallyQueue does not include the BAS chart of
+  accounts: paste your own list, for example from your bookkeeping service.</p>
+  <form method="post" action="/accounts" class="stack">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <label for="accounts">One account per line: the number, then its name{% if count %} ({{ count }} saved){% endif %}</label>
+    <textarea id="accounts" name="accounts" rows="18" spellcheck="false" placeholder="1930 Företagskonto&#10;2640 Ingående moms">{{ source }}</textarea>
+    <div><button>Save accounts</button></div>
+  </form>
+  <p class="hint">Saving replaces the whole list. A SIE file can be pasted as it is: only its
+  <code>#KONTO</code> lines are read. The list stays on this server, in your own data folder.</p>
+</section>
+{% endblock %}

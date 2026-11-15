@@ -1,0 +1,24 @@
+# Tool settings only. TallyQueue is not a package to install: it runs with `python -m tallyqueue`,
+# and its dependencies are pinned in requirements.txt and requirements-dev.txt.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py313"
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "C4", "SIM"]
+ignore = [
+  "E501",   # the formatter wraps what can be wrapped; long tool descriptions stay readable
+  "S104",   # binding to 0.0.0.0 is intended: the server runs in a container behind a proxy
+  "SIM108", # an if/else is often clearer than a ternary
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "E402"] # asserts, subprocess and made-up tokens are what tests are made of
+"scripts/*" = ["S"]

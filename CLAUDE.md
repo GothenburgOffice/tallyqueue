@@ -1,6 +1,22 @@
-# tallyqueue
+# TallyQueue
 
-<!-- What this repository is, how to run it, and its conventions go here. -->
+The shared project reference for coding agents (also read by Copilot):
+
+@.github/copilot-instructions.md
+
+## Claude Code specifics
+
+- Claude Code's sign-in and settings persist in the dev container's `claude-config` volume
+  (`CLAUDE_CONFIG_DIR=/root/.claude`). Project memory is bind-mounted from
+  `~/.claude-memory/tallyqueue` on the host (`CLAUDE_MEMORY_DIR` overrides it) at
+  `/root/.claude/projects/-app/memory`.
+- Never delete `tallyqueue.code-workspace`: VS Code closes with it and the session is lost.
+- On a host without the dev container, run the checks through Docker
+  (`docker compose -f compose.yaml -f compose.dev.yaml run --rm app <command>`) rather than
+  installing Python packages on the host.
+- Never put a real receipt, real figures or a real token in a prompt, a test, an issue or a
+  pull request. If the owner shares one to explain a problem, describe the problem with
+  made-up data instead of copying it.
 
 ## Branches and pull requests
 

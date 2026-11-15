@@ -1,0 +1,36 @@
+version: 2
+updates:
+  # requirements.txt and requirements-dev.txt, with the pins in constraints.txt. After a bump
+  # of a direct dependency, renew constraints.txt (README, "Dependencies") if CI says so.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # A new Python line (3.14, ...) is a decision: move the Dockerfile, CI and pyproject together.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # Caddy in compose.caddy.yaml.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

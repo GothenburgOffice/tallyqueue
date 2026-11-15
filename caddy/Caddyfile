@@ -1,0 +1,9 @@
+# Used by compose.caddy.yaml. For a Caddy you already run on the host, see README, "Behind Caddy".
+{$SITE_ADDRESS} {
+	encode zstd gzip
+	# A little more than the largest receipt (MAX_RECEIPT_BYTES) sent as base64 over MCP.
+	request_body {
+		max_size 25MB
+	}
+	reverse_proxy app:8000
+}
