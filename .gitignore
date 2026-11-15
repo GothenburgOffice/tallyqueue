@@ -1,0 +1,32 @@
+# Real bookkeeping data and receipts never belong in this repository.
+# Tests create their own made-up files; nothing below is needed as a fixture.
+data/
+.localdata/
+receipts/
+exports/
+*.pdf
+*.eml
+*.msg
+*.sie
+*.si
+*.se
+*.xlsx
+*.xls
+*.csv
+
+# Secrets and local settings
+.env*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Scratch and session notes
+notes/
+CLAUDE.local.md
+.claude/settings.local.json
+*.log
