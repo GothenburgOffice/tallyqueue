@@ -258,13 +258,13 @@ def parse_accounts(source: str) -> list[dict]:
     """The user's own list of accounts, from pasted text.
 
     One account per line: "1930 Företagskonto", "1930;Företagskonto", or a SIE line
-    (#KONTO 1930 "Företagskonto"). Other lines that start with # are skipped, so a whole
-    SIE file can be pasted.
+    (#KONTO 1930 "Företagskonto"). Other lines that start with # are skipped, and so are the
+    braces around a voucher's rows, so a whole SIE file can be pasted.
     """
     accounts: dict[str, str] = {}
     for n, line in enumerate(source.splitlines(), 1):
         line = line.strip().lstrip('﻿')
-        if not line:
+        if not line or line in ('{', '}'):
             continue
         if line.startswith('#'):
             m = _SIE_KONTO.fullmatch(line)

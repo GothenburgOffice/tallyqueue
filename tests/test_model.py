@@ -178,3 +178,29 @@ def test_accounts_are_parsed_from_plain_lines_and_sie_lines():
     ]
     with pytest.raises(Invalid, match='Line 2'):
         model.parse_accounts('1930 Bank\nBank account\n')
+
+
+def test_a_whole_sie_file_with_vouchers_keeps_its_accounts():
+    # The rows of a voucher sit between braces, on lines of their own or after #VER.
+    parsed = model.parse_accounts(
+        '#FLAGGA 0\n'
+        '#SIETYP 4\n'
+        '#FNAMN "Exempel Enskild Firma"\n'
+        '#KONTO 1930 "Företagskonto"\n'
+        '#KONTO 6110 "Kontorsmateriel"\n'
+        '#VER A 1 20261102 "Kontorsvaror"\n'
+        '{\n'
+        '\t#TRANS 6110 {} 399.00\n'
+        '\t#TRANS 1930 {} -399.00\n'
+        '}\n'
+        '#VER A 2 20261103 "Porto" {\n'
+        '   #TRANS 6110 {} 50.00\n'
+        '   #TRANS 1930 {} -50.00\n'
+        '}\n'
+    )
+    assert parsed == [
+        {'account': '1930', 'name': 'Företagskonto'},
+        {'account': '6110', 'name': 'Kontorsmateriel'},
+    ]
+    with pytest.raises(Invalid, match='Line 2'):
+        model.parse_accounts('1930 Bank\n{ not an account }\n')

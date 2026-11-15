@@ -49,7 +49,8 @@ These are decided. Don't build towards them, and say so if a request would.
 No real receipts, names, amounts, account details or tokens in the repo, issues, pull requests,
 tests or logs. Tests and `scripts/smoke.py` build their own made-up files in code and say
 "made up" in them. `.gitignore` keeps data folders and receipt and export file types out; don't
-add fixtures of those types.
+add fixtures of those types. `.dockerignore` lists the same patterns, so a local receipt never
+reaches an image layer: add a pattern to both files (`tests/test_repo.py` compares them).
 
 ## Environment
 
