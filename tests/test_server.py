@@ -8,6 +8,7 @@ files, which are built here in code. No real bookkeeping data belongs in this re
 import asyncio
 import base64
 import hashlib
+import html
 import http.client
 import json
 import os
@@ -677,8 +678,8 @@ def test_the_item_page_takes_a_rate_or_the_total_in_sek(alice, hosting):
     rate = {'exchange_rate': '10,5', 'exchange_rate_source': 'Riksbanken 2026-11-05'}
     assert alice.post(f'{path}/facts', form | rate)[0] == 303
     page = alice.get(path)[2].decode()
-    # The total worked out from the rate is shown beside its field, not in it: what is in the
-    # field counts as given, and would replace the rate on the next save.
+    # The total worked out from the rate is shown beside its field, not in it: the field is for
+    # a total given as it is.
     assert 'Gives 126.00 SEK' in page and 'value="10.5"' in page
     assert re.search(r'name="amount_sek"[^>]* value=""', page)
     assert '12.00 USD at 10.5 is <strong>126.00 SEK</strong>' in page
@@ -694,6 +695,100 @@ def test_the_item_page_takes_a_rate_or_the_total_in_sek(alice, hosting):
     # an amount in SEK has no such fields
     assert 'name="exchange_rate"' not in alice.get(f'/items/{hosting["id"]}')[2].decode()
     ok('update_item', {'id': sha(data), 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
+def as_shown(page: str) -> dict:
+    """The facts form as a browser sends it back: every field with the value the page put in it."""
+    start = page.index('/facts"')
+    form = page[start : page.index('</form>', start)]
+    sent = {
+        name: html.unescape(value)
+        for name, value in re.findall(r'<input[^>]* name="(\w+)"[^>]* value="([^"]*)"', form)
+    }
+    kind = re.search(r'<option value="(\w+)" selected', form)
+    return sent | {'kind': kind.group(1) if kind else ''}
+
+
+def test_the_facts_form_sends_every_field_back_and_only_what_was_typed_counts(alice):
+    data = pdf('Example Hosting GmbH, invoice 7, 20.00 EUR (made up)')
+    assert alice.upload('hosting-eur.pdf', data)[0] == 303
+    path, ref = f'/items/{sha(data)}', sha(data)
+    facts = {'date': '2026-10-19', 'amount': '20.00', 'currency': 'EUR'}
+    rate = {'exchange_rate': '11.4235', 'exchange_rate_source': 'Riksbanken 2026-10-19'}
+    ok('update_item', {'id': ref, 'facts': facts | rate})
+
+    def stored() -> list:
+        got = ok('get_item', {'id': ref})['facts']
+        return [got.get(name) for name in ('currency', *model.SEK_SIDE)]
+
+    # The page puts the saved rate in its field, so a browser sends it back with every save.
+    shown = as_shown(alice.get(path)[2].decode())
+    assert set(shown) - {'csrf'} == set(model.FACT_FIELDS) and shown['exchange_rate'] == '11.4235'
+
+    # Another field changes: the rate stays, and the total follows the amount.
+    assert alice.post(f'{path}/facts', shown | {'amount': '30.00'})[0] == 303
+    assert stored() == ['EUR', '11.4235', '342.71', 'Riksbanken 2026-10-19']
+
+    # The currency changes: the rate was for EUR and is not used for USD, and its total and
+    # its source go with it.
+    shown = as_shown(alice.get(path)[2].decode())
+    assert alice.post(f'{path}/facts', shown | {'currency': 'USD'})[0] == 303
+    assert stored() == ['USD', None, None, None]
+    page = alice.get(path)[2].decode()
+    assert (
+        re.search(r'name="exchange_rate"[^>]* value=""', page)
+        and 'The amount is in USD and its total in SEK is not given yet' in page
+    )
+
+    # The new rate typed in the same edit as the currency is kept.
+    ok('update_item', {'id': ref, 'facts': {'currency': 'EUR'} | rate})
+    shown = as_shown(alice.get(path)[2].decode())
+    new = {'currency': 'USD', 'exchange_rate': '10,5', 'exchange_rate_source': 'card statement'}
+    assert alice.post(f'{path}/facts', shown | new)[0] == 303
+    assert stored() == ['USD', '10.5', '315.00', 'card statement']
+
+    # The total as it was drawn is typed beside a saved rate: it replaces the rate.
+    shown = as_shown(alice.get(path)[2].decode())
+    assert shown['exchange_rate'] == '10.5' and shown['amount_sek'] == ''
+    assert alice.post(f'{path}/facts', shown | {'amount_sek': '318,40'})[0] == 303
+    assert stored() == ['USD', None, '318.40', 'card statement']
+    # A rate typed beside a saved total replaces the total. What was drawn stays when only the
+    # currency is corrected: it does not depend on the currency.
+    shown = as_shown(alice.get(path)[2].decode())
+    assert shown['amount_sek'] == '318.40'
+    assert alice.post(f'{path}/facts', shown | {'currency': 'EUR'})[0] == 303
+    assert stored() == ['EUR', None, '318.40', 'card statement']
+    shown = as_shown(alice.get(path)[2].decode())
+    assert alice.post(f'{path}/facts', shown | {'exchange_rate': '11.5'})[0] == 303
+    assert stored() == ['EUR', '11.5', '345.00', 'card statement']
+
+    # The amount turns out to be in SEK: the form still sends the rate, and it is dropped.
+    shown = as_shown(alice.get(path)[2].decode())
+    assert alice.post(f'{path}/facts', shown | {'currency': 'SEK'})[0] == 303
+    assert stored() == ['SEK', None, None, None]
+
+    # A refused save with SEK typed comes back without the SEK-side fields. Back to EUR from
+    # there, the rate is still the saved one: a field the page did not have changes nothing.
+    ok('update_item', {'id': ref, 'facts': {'currency': 'EUR'} | rate})
+    shown = as_shown(alice.get(path)[2].decode())
+    status, _, body = alice.post(f'{path}/facts', shown | {'currency': 'SEK', 'date': '19 October'})
+    refused_page = as_shown(body.decode())
+    assert status == 422 and refused_page['currency'] == 'SEK' and 'exchange_rate' not in refused_page
+    assert alice.post(f'{path}/facts', refused_page | {'currency': 'EUR', 'date': '2026-10-19'})[0] == 303
+    assert stored() == ['EUR', '11.4235', '342.71', 'Riksbanken 2026-10-19']
+
+    # A prepped item must keep its total in SEK, so changing its currency is refused until the
+    # new rate is given. The page says why the rate in the field no longer counts.
+    lines = {'lines': [{'account': '6540', 'debit': '342.71'}, {'account': '1930', 'credit': '342.71'}]}
+    ok('update_item', {'id': ref, 'kontering': lines, 'status': 'prepped'})
+    shown = as_shown(alice.get(path)[2].decode())
+    status, _, body = alice.post(f'{path}/facts', shown | {'currency': 'USD'})
+    page = body.decode()
+    assert status == 422 and 'total in SEK is missing' in page
+    assert 'value="11.4235"' in page and '11.4235 was the rate for EUR' in page
+    assert stored() == ['EUR', '11.4235', '342.71', 'Riksbanken 2026-10-19']
+    assert 'was the rate for' not in alice.get(path)[2].decode()
+    ok('update_item', {'id': ref, 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
 
 
 def test_the_list_writes_the_kontering_out_and_changes_status(alice, hosting):

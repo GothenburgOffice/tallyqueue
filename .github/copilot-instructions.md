@@ -111,7 +111,12 @@ or a pull request, and report only checks that actually ran.
   (the one place an amount is computed: amount × rate, rounded half up to öre) or given as it
   is in `amount_sek`, and then no rate is kept. A stored rate and a stored total never
   disagree, and an amount in SEK has neither. A rate is never estimated: it is given, with its
-  source in `exchange_rate_source`.
+  source in `exchange_rate_source`. A rate belongs to its currency: it is dropped when the
+  currency changes, unless the same change gives the new one.
+- **In the facts form, only what was typed counts as given.** A browser sends every field back,
+  so `web.change` leaves a SEK-side field out of the change when it still holds what the page
+  put in it (`web._sek_fields`). Otherwise the old currency's rate would count as given for
+  the new one.
 - **`riksbank.py` is the only code that calls another service**, and only when a user asks: the
   button on the item's page or the `get_riksbank_rate` tool. The address is fixed but for a
   checked currency code and two dates; redirects are not followed; the rate is read as the

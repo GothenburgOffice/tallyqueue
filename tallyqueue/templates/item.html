@@ -144,6 +144,8 @@
     <div>
       <input id="f-exchange_rate" name="exchange_rate" inputmode="decimal" class="num" value="{{ facts.exchange_rate or '' }}" placeholder="11.4235" autocomplete="off">
       {% if sek.worked_out %}<div class="sub">Gives {{ sek.worked_out|money }} SEK.</div>{% endif %}
+      {% if sek.rate_was_for %}<div class="sub">{{ facts.exchange_rate }} was the rate for {{ sek.rate_was_for }}, and a rate
+      is not kept when the currency changes. Type the rate for the new currency, or the total in SEK.</div>{% endif %}
     </div>
     <label for="f-amount_sek">or the total in SEK <span class="sub">as it was drawn</span></label>
     <div>

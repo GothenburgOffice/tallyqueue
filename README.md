@@ -45,6 +45,10 @@ be prepped. It is given one of two ways, by the AI client or by you in the web p
 Beside it goes where the figure comes from: the receipt, the card statement, or Riksbanken's rate
 for the date when neither of the first two has it.
 
+A rate belongs to its currency. When you correct the currency, the rate and the total worked out
+from it are dropped, unless you give the new rate in the same edit. A total given as it was
+drawn stays.
+
 TallyQueue can fetch Riksbanken's rate, and only when asked: a button on the item's page, with a
 date you pick, and a tool for the AI client. On a weekend or a holiday it takes the latest rate
 before the date and says which date that was. Three things to know:

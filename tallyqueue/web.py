@@ -260,6 +260,19 @@ def _draft_lines(form) -> list[dict]:
     return lines
 
 
+def _sek_fields(saved: dict) -> dict:
+    """What the facts form puts in its SEK-side fields for the saved facts.
+
+    A total in SEK that was worked out from a rate is shown beside its field, not in it: the
+    field is for a total given as it is.
+    """
+    return {
+        'exchange_rate': saved['exchange_rate'] or '',
+        'amount_sek': '' if saved['exchange_rate'] else saved['amount_sek'] or '',
+        'exchange_rate_source': saved['exchange_rate_source'] or '',
+    }
+
+
 async def _item_page(request: Request, session: auth.Session, item: dict, **context) -> Response:
     everything = await _run(store.all_items, session.user)
     accounts = await _run(store.read_accounts, session.user)
@@ -271,19 +284,30 @@ async def _item_page(request: Request, session: auth.Session, item: dict, **cont
     draft_facts = context.pop('draft_facts', None)
     facts = draft_facts or item['facts']
     saved = item['facts']
+    currency = (facts.get('currency') or '').strip().upper()
+    # A save that was refused comes back with what was sent. A rate that was left as it was
+    # while the currency was changed is still in its field then, and no longer counts.
+    rate_was_for = (
+        saved['currency']
+        if draft_facts
+        and saved['currency']
+        and saved['exchange_rate']
+        and draft_facts.get('exchange_rate') == saved['exchange_rate']
+        and currency != saved['currency']
+        else None
+    )
     return _page(
         'item.html',
         session,
         status_code,
         item=item,
         facts=facts,
-        # A total in SEK that was worked out from a rate is shown beside its field, not in it:
-        # what is in the field counts as given, and would replace the rate.
         sek={
-            'shown': (facts.get('currency') or '').strip().upper() != 'SEK',
-            'field': facts.get('amount_sek') or '' if draft_facts or not saved['exchange_rate'] else '',
+            'shown': currency != 'SEK',
+            'field': facts.get('amount_sek') or '' if draft_facts else _sek_fields(saved)['amount_sek'],
             'worked_out': saved['amount_sek'] if saved['exchange_rate'] and not draft_facts else None,
             'implied': None if draft_facts else model.implied_rate(saved),
+            'rate_was_for': rate_was_for,
         },
         edit_kontering=item['status'] == 'new' or draft_kontering is not None,
         # Riksbanken's rate can be fetched for the saved currency, on a date the user picks.
@@ -327,8 +351,19 @@ async def change(request: Request) -> Response:
     draft: dict = {}
     try:
         if action == 'facts':
-            draft['draft_facts'] = {name: str(form.get(name, '')).strip() for name in model.FACT_FIELDS}
-            changes = {'facts': draft['draft_facts']}
+            sent = {name: str(form.get(name, '')).strip() for name in model.FACT_FIELDS}
+            draft['draft_facts'] = sent
+            # A browser sends every field back, touched or not. On the SEK side that matters:
+            # a rate that is given is kept, also when the currency changes. So a SEK-side
+            # field that still holds what the page put in it, or that the page did not have,
+            # is not part of the change, and model.settle_sek decides what becomes of it.
+            current = await _run(store.get_item, session.user, ref)
+            untouched = {
+                name
+                for name, shown in _sek_fields(current['facts']).items()
+                if name not in form or sent[name] == shown
+            }
+            changes = {'facts': {name: value for name, value in sent.items() if name not in untouched}}
         elif action == 'kontering':
             draft['draft_kontering'] = {
                 'lines': _draft_lines(form),
