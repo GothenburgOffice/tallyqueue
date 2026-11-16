@@ -85,9 +85,14 @@ or a pull request, and report only checks that actually ran.
 - `tallyqueue/config.py`: settings from the environment and the Host and Origin checks.
   `PUBLIC_URL` is the one source for links, the allowed host and origin, and the Secure cookie.
 - `tallyqueue/server.py`: the MCP tools (`add_item`, `list_items`, `get_item`, `update_item`,
-  `list_accounts`), `POST /upload`, `/health`, and `build_app()`, which wraps the app with the
-  host check, the token check on `/mcp` and the default response headers.
+  `list_accounts`, `get_riksbank_rate`), `POST /upload`, `/health`, and `build_app()`, which
+  wraps the app with the host check, the token check on `/mcp` and the default response headers.
+- `tallyqueue/riksbank.py`: Riksbanken's published rate for a currency on a date, fetched on
+  request and remembered in memory.
 - `tallyqueue/web.py` with `templates/` and `static/`: the web page. Server-rendered forms.
+  `templates/_macros.html` holds what the list and the item page share: the kontering written
+  out as a voucher, and the status forms. The stylesheet's address carries a checksum of its
+  content, so a change to `app.css` reaches browsers without a version bump.
 
 ## Rules that must not regress
 
@@ -95,11 +100,30 @@ or a pull request, and report only checks that actually ran.
   passes it to the store. Nothing trusts a user name sent by a client.
 - **Status conditions live in `model.status_problems`** and are enforced in
   `store.update_item`, for the MCP tools and the web page alike: prepped needs date, amount,
-  currency and a balanced kontering; booked needs the voucher number and the receipt-attached
-  tick; skipped needs a reason. A prepped or booked item must stay that complete.
+  currency, the total in SEK when the currency is another, and a balanced kontering; booked
+  needs the voucher number and the receipt-attached tick; skipped needs a reason. A prepped or
+  booked item must stay that complete.
 - **Amounts are decimal strings with two decimals**, never floats: in the tool schema, in
   `model.money` and on disk. A JSON number is refused, and so is an amount that would have to
-  be rounded or guessed ("1,250").
+  be rounded or guessed ("1,250"). An exchange rate is text too (`model.rate`).
+- **The SEK side of another currency lives in `model.settle_sek`**, which the store applies to
+  every change of facts. The total in SEK is either worked out from a given `exchange_rate`
+  (the one place an amount is computed: amount × rate, rounded half up to öre) or given as it
+  is in `amount_sek`, and then no rate is kept. A stored rate and a stored total never
+  disagree, and an amount in SEK has neither. A rate is never estimated: it is given, with its
+  source in `exchange_rate_source`. A rate belongs to its currency: it is dropped when the
+  currency changes, unless the same change gives the new one.
+- **In the facts form, only what was typed counts as given.** A browser sends every field back,
+  so `web.change` leaves a SEK-side field out of the change when it still holds what the page
+  put in it (`web._sek_fields`). Otherwise the old currency's rate would count as given for
+  the new one.
+- **`riksbank.py` is the only code that calls another service**, and only when a user asks: the
+  button on the item's page or the `get_riksbank_rate` tool. The address is fixed but for a
+  checked currency code and two dates; redirects are not followed; the rate is read as the
+  digits sent, never as a float; `RIKSBANK_LOOKUP=0` turns it off. Nothing about a receipt or a
+  user goes out. Tests stand in for the network (`riksbank._get`) and never call Riksbanken.
+- **Every status can be changed by hand in the web page**, in the list and on the item's page,
+  through the same forms (`templates/_macros.html`). The AI client is never the only way.
 - **A duplicate file never overwrites** what is stored.
 - **No JavaScript on the pages.** The page policy is `default-src 'none'` with styles, images
   and frames from this origin only. Templates autoescape; never mark user text as safe.

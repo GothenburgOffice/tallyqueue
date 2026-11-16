@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_macros.html" import voucher, prep_form, book_form, skip_form, reopen_form %}
 {% block title %}Items{% endblock %}
 {% block main %}
 <h1>Receipts and invoices to book</h1>
@@ -26,28 +27,47 @@
       <th scope="col">Counterparty</th>
       <th scope="col" class="num">Total</th>
       <th scope="col" class="num">VAT</th>
-      <th scope="col">Kontering</th>
+      <th scope="col" class="kont">
+        <div class="voucher-head"><span>Kontering, in SEK</span><span class="num">Debit</span><span class="num">Credit</span></div>
+      </th>
       <th scope="col">Status</th>
     </tr>
   </thead>
   <tbody>
     {% for item in items %}
+    {% set facts = item.facts %}
     <tr>
-      <td class="nowrap">{{ item.facts.date or '–' }}</td>
+      <td class="nowrap">{{ facts.date or '–' }}</td>
       <td>
-        <a href="/items/{{ item.id }}">{{ item.facts.counterparty or item.receipt.filename }}</a>
-        {% if item.facts.description %}<div class="sub">{{ item.facts.description }}</div>{% endif %}
+        <a href="/items/{{ item.id }}">{{ facts.counterparty or item.receipt.filename }}</a>
+        {% if facts.description %}<div class="sub">{{ facts.description }}</div>{% endif %}
       </td>
-      <td class="num nowrap">{% if item.facts.amount %}{{ item.facts.amount }} {{ item.facts.currency or '' }}{% else %}–{% endif %}</td>
-      <td class="num nowrap">{{ item.facts.vat_amount or '–' }}</td>
-      <td class="sub">
-        {% for line in (item.kontering.lines if item.kontering else []) %}
-        <span class="nowrap">{{ 'D' if line.debit else 'C' }} {{ line.account }} {{ line.debit or line.credit }}</span>{% if not loop.last %}, {% endif %}
-        {% else %}–{% endfor %}
+      <td class="num nowrap">
+        {% if facts.amount %}{{ facts.amount|money }} {{ facts.currency or '' }}{% else %}–{% endif %}
+        {% if facts.amount_sek %}
+        <div class="sub">= {{ facts.amount_sek|money }} SEK</div>
+        {% elif facts.currency and facts.currency != 'SEK' %}
+        <div class="sub warn">no total in SEK yet</div>
+        {% endif %}
       </td>
-      <td class="nowrap">
+      <td class="num nowrap{% if not facts.vat_amount %} none{% endif %}">{{ facts.vat_amount|money or '–' }}</td>
+      <td class="kont">
+        {% if item.kontering and item.kontering.lines %}{{ voucher(item.kontering, account_names) }}{% else %}<span class="sub">No kontering yet</span>{% endif %}
+      </td>
+      <td class="state">
         <span class="status {{ item.status }}">{{ item.status }}</span>
-        {% if item.booking and item.booking.voucher %}<div class="sub">{{ item.booking.voucher }}</div>{% endif %}
+        {% if item.booking and item.booking.voucher %}<span class="sub">{{ item.booking.voucher }}</span>{% endif %}
+        {% if item.status == 'skipped' and item.skip_reason %}<div class="sub">{{ item.skip_reason }}</div>{% endif %}
+        {% if item.status == 'prepped' %}{{ book_form(item, session.csrf, here) }}{% endif %}
+        <details class="change">
+          <summary>{{ 'Something else' if item.status == 'prepped' else 'Change status' }}</summary>
+          {% if item.status == 'new' %}
+          {{ prep_form(item, session.csrf, prep_problems[item.id], here) }}
+          {{ book_form(item, session.csrf, here) }}
+          {% endif %}
+          {% if item.status in ('new', 'prepped') %}{{ skip_form(item, session.csrf, here) }}{% endif %}
+          {% if item.status != 'new' %}{{ reopen_form(item, session.csrf, here) }}{% endif %}
+        </details>
       </td>
     </tr>
     {% endfor %}

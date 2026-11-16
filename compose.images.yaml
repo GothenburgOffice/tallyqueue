@@ -13,6 +13,7 @@ services:
       TALLYQUEUE_USERS: ${TALLYQUEUE_USERS:-}
       MAX_RECEIPT_BYTES: ${MAX_RECEIPT_BYTES:-15728640}
       SOURCE_URL: ${SOURCE_URL:-}
+      RIKSBANK_LOOKUP: ${RIKSBANK_LOOKUP:-1}
     volumes:
       - data:/data
     read_only: true

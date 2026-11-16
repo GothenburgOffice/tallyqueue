@@ -129,7 +129,8 @@ async def main():
 
         tools = sorted(t.name for t in (await session.list_tools()).tools)
         check(
-            tools == ['add_item', 'get_item', 'list_accounts', 'list_items', 'update_item'],
+            tools
+            == ['add_item', 'get_item', 'get_riksbank_rate', 'list_accounts', 'list_items', 'update_item'],
             f'tools: {", ".join(tools)}',
         )
 
@@ -141,7 +142,8 @@ async def main():
             )
             item = await call('get_item', id=software_id)
             check(
-                item['status'] == 'new' and item['facts']['currency'] == 'EUR', 'the uploaded item survived'
+                item['status'] == 'new' and item['facts']['amount_sek'] == '228.47',
+                'the uploaded item survived, with its total in SEK',
             )
             status, _, body = request(f'{base}/upload', HOSTING, {'X-API-Key': token})
             check(
@@ -200,6 +202,12 @@ async def main():
         check(
             item['status'] == 'new' and item['missing_for_prepped'], 'an item without a kontering stays new'
         )
+        item = await call(
+            'update_item',
+            id=software_id,
+            facts={'exchange_rate': '11.4235', 'exchange_rate_source': 'Riksbanken 2026-10-19 (made up)'},
+        )
+        check(item['facts']['amount_sek'] == '228.47', 'a rate gives the total in SEK')
 
         lunch = await call('add_item', file_base64=base64.b64encode(LUNCH).decode(), filename='lunch.txt')
         item = await call(

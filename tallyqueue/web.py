@@ -9,8 +9,10 @@ cookie; every form post is checked for its origin and for the session's CSRF tok
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
+from decimal import Decimal
 from urllib.parse import quote
 
 import anyio
@@ -18,12 +20,16 @@ import jinja2
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import __version__, auth, config, model, store
+from . import __version__, auth, config, model, riksbank, store
 
 sessions = auth.Sessions()
 COOKIE = '__Host-tallyqueue' if config.SECURE else 'tallyqueue'
 STATIC = os.path.join(os.path.dirname(__file__), 'static')
 STATIC_TYPES = {'app.css': 'text/css; charset=utf-8', 'icon.svg': 'image/svg+xml'}
+# Browsers keep the stylesheet for an hour. Its address carries a checksum of its content, so
+# a changed stylesheet is fetched at once, whether or not the version number moved.
+with open(os.path.join(STATIC, 'app.css'), 'rb') as _css:
+    STYLE = hashlib.sha256(_css.read()).hexdigest()[:12]
 IMAGES = {'png': 'image/png', 'jpg': 'image/jpeg', 'gif': 'image/gif', 'webp': 'image/webp'}
 MEDIA = {'pdf': 'application/pdf', **IMAGES}
 SPARE_ROWS = 4
@@ -42,6 +48,7 @@ FLASH = {
     'duplicate': 'That file is already in the list. This is the item; nothing was changed.',
     'deleted': 'The item and its receipt were deleted.',
     'accounts': 'Your list of accounts was saved.',
+    'rate': "Riksbanken's rate was fetched and saved with the facts. Check that it is for the date you want.",
 }
 TABS = (
     ('todo', 'To do'),
@@ -59,7 +66,7 @@ FACT_LABELS = {
     'amount': 'Total incl. VAT',
     'currency': 'Currency',
     'vat_amount': 'VAT (moms)',
-    'amount_sek': 'Total in SEK, if another currency',
+    # The SEK side (model.SEK_SIDE) has its own block in the form, shown for another currency.
     'invoice_number': 'Invoice number',
     'due_date': 'Due date',
     'payment_date': 'Paid on',
@@ -74,11 +81,19 @@ env = jinja2.Environment(
 )
 
 
+def _money(value) -> str:
+    """An amount for reading, not for a form field: "12 500.00", with thin spaces that do not break."""
+    return f'{Decimal(value):,.2f}'.replace(',', '\u202f') if value else ''
+
+
+env.filters['money'] = _money
+
+
 def _page(template: str, session: auth.Session | None, status_code: int = 200, **context) -> Response:
     context.setdefault('flash', None)
     context.setdefault('error', None)
     html = env.get_template(template).render(
-        session=session, version=__version__, source_url=config.SOURCE_URL, **context
+        session=session, version=__version__, style=STYLE, source_url=config.SOURCE_URL, **context
     )
     return HTMLResponse(html, status_code=status_code, headers={'Content-Security-Policy': PAGE_POLICY})
 
@@ -199,11 +214,17 @@ async def items(request: Request) -> Response:
         status = 'todo'
     query = request.query_params.get('q', '').strip()[:100]
     everything = await _run(store.all_items, session.user)
+    accounts = await _run(store.read_accounts, session.user)
+    shown = store.search(everything, status, query)
     return _page(
         'items.html',
         session,
-        items=store.search(everything, status, query),
+        items=shown,
         counts=store.counts(everything),
+        account_names={a['account']: a['name'] for a in accounts},
+        prep_problems={i['id']: model.prep_problems(i) for i in shown if i['status'] == 'new'},
+        # Where a status change made in the list comes back to.
+        here=f'/items?status={status}' + (f'&q={quote(query, safe="")}' if query else ''),
         tabs=TABS,
         status=status,
         query=query,
@@ -239,19 +260,58 @@ def _draft_lines(form) -> list[dict]:
     return lines
 
 
+def _sek_fields(saved: dict) -> dict:
+    """What the facts form puts in its SEK-side fields for the saved facts.
+
+    A total in SEK that was worked out from a rate is shown beside its field, not in it: the
+    field is for a total given as it is.
+    """
+    return {
+        'exchange_rate': saved['exchange_rate'] or '',
+        'amount_sek': '' if saved['exchange_rate'] else saved['amount_sek'] or '',
+        'exchange_rate_source': saved['exchange_rate_source'] or '',
+    }
+
+
 async def _item_page(request: Request, session: auth.Session, item: dict, **context) -> Response:
     everything = await _run(store.all_items, session.user)
     accounts = await _run(store.read_accounts, session.user)
-    kontering = context.pop('draft_kontering', None) or item['kontering'] or {}
+    draft_kontering = context.pop('draft_kontering', None)
+    kontering = draft_kontering or item['kontering'] or {}
     lines = [dict(ln) for ln in kontering.get('lines') or []]
     debit, credit = model.totals(item['kontering'])
     status_code = 422 if context.get('error') else 200
+    draft_facts = context.pop('draft_facts', None)
+    facts = draft_facts or item['facts']
+    saved = item['facts']
+    currency = (facts.get('currency') or '').strip().upper()
+    # A save that was refused comes back with what was sent. A rate that was left as it was
+    # while the currency was changed is still in its field then, and no longer counts.
+    rate_was_for = (
+        saved['currency']
+        if draft_facts
+        and saved['currency']
+        and saved['exchange_rate']
+        and draft_facts.get('exchange_rate') == saved['exchange_rate']
+        and currency != saved['currency']
+        else None
+    )
     return _page(
         'item.html',
         session,
         status_code,
         item=item,
-        facts=context.pop('draft_facts', None) or item['facts'],
+        facts=facts,
+        sek={
+            'shown': currency != 'SEK',
+            'field': facts.get('amount_sek') or '' if draft_facts else _sek_fields(saved)['amount_sek'],
+            'worked_out': saved['amount_sek'] if saved['exchange_rate'] and not draft_facts else None,
+            'implied': None if draft_facts else model.implied_rate(saved),
+            'rate_was_for': rate_was_for,
+        },
+        edit_kontering=item['status'] == 'new' or draft_kontering is not None,
+        # Riksbanken's rate can be fetched for the saved currency, on a date the user picks.
+        lookup=riksbank.ENABLED and saved['currency'] not in (None, 'SEK'),
         fact_labels=FACT_LABELS,
         kinds=model.KINDS,
         lines=lines + [{'account': '', 'debit': '', 'credit': '', 'text': ''}] * SPARE_ROWS,
@@ -291,8 +351,19 @@ async def change(request: Request) -> Response:
     draft: dict = {}
     try:
         if action == 'facts':
-            draft['draft_facts'] = {name: str(form.get(name, '')).strip() for name in model.FACT_FIELDS}
-            changes = {'facts': draft['draft_facts']}
+            sent = {name: str(form.get(name, '')).strip() for name in model.FACT_FIELDS}
+            draft['draft_facts'] = sent
+            # A browser sends every field back, touched or not. On the SEK side that matters:
+            # a rate that is given is kept, also when the currency changes. So a SEK-side
+            # field that still holds what the page put in it, or that the page did not have,
+            # is not part of the change, and model.settle_sek decides what becomes of it.
+            current = await _run(store.get_item, session.user, ref)
+            untouched = {
+                name
+                for name, shown in _sek_fields(current['facts']).items()
+                if name not in form or sent[name] == shown
+            }
+            changes = {'facts': {name: value for name, value in sent.items() if name not in untouched}}
         elif action == 'kontering':
             draft['draft_kontering'] = {
                 'lines': _draft_lines(form),
@@ -312,6 +383,14 @@ async def change(request: Request) -> Response:
                 }
             elif to == 'skipped':
                 changes['skip_reason'] = str(form.get('skip_reason', ''))
+        elif action == 'riksbanken' and riksbank.ENABLED:
+            # The rate for the item's saved currency. It is saved like a rate typed by hand, so
+            # the total in SEK is worked out from it and the source says where it is from.
+            current = await _run(store.get_item, session.user, ref)
+            found = await _run(
+                riksbank.rate, current['facts']['currency'] or '', str(form.get('rate_date', ''))
+            )
+            changes = {'facts': {'exchange_rate': found['rate'], 'exchange_rate_source': found['source']}}
         elif action == 'delete':
             if 'confirm' not in form:
                 raise store.StoreError(
@@ -324,13 +403,17 @@ async def change(request: Request) -> Response:
         await _run(store.update_item, session.user, ref, via='web', **changes)
     except store.NotFound as e:
         return _message(session, 404, 'Not found', str(e))
-    except (store.StoreError, model.Invalid) as e:
+    except (store.StoreError, model.Invalid, riksbank.RateUnavailable) as e:
         try:
             current = await _run(store.get_item, session.user, ref)
         except store.StoreError:
             return _message(session, 404, 'Not found', str(e))
         return await _item_page(request, session, current, error=str(e), **draft)
-    return _redirect(f'/items/{ref}?msg=saved')
+    # A status change made in the list goes back to the list, on the same tab and search.
+    back = str(form.get('back', ''))
+    if back.startswith('/items?') and _safe_next(back) == back:
+        return _redirect(f'{back}&msg=saved')
+    return _redirect(f'/items/{ref}?msg={"rate" if action == "riksbanken" else "saved"}')
 
 
 async def receipt(request: Request) -> Response:

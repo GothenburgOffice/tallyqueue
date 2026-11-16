@@ -1,0 +1,81 @@
+{# Pieces the list and the item page share. #}
+
+{# A kontering written out as a voucher: account, its name and the line's text, debit, credit. #}
+{% macro voucher(kontering, names, totals=none) %}
+<table class="voucher{% if totals %} full{% endif %}">
+  <thead>
+    <tr>
+      <th scope="col">Account</th>
+      <th scope="col">Name</th>
+      <th scope="col" class="num">Debit</th>
+      <th scope="col" class="num">Credit</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for line in kontering.lines %}
+    <tr>
+      <td class="acct">{{ line.account }}</td>
+      <td>{{ names.get(line.account) or '' }}{% if line.text %} <span class="sub">{{ line.text }}</span>{% endif %}</td>
+      <td class="num">{{ line.debit|money }}</td>
+      <td class="num">{{ line.credit|money }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+  {% if totals %}
+  <tfoot>
+    <tr class="{{ 'balanced' if totals.balanced else 'unbalanced' }}">
+      <td></td>
+      <th scope="row">{{ 'Balances' if totals.balanced else 'Does not balance' }}</th>
+      <td class="num">{{ totals.debit|money }}</td>
+      <td class="num">{{ totals.credit|money }}</td>
+    </tr>
+  </tfoot>
+  {% endif %}
+</table>
+{% endmacro %}
+
+{# The status forms. `back` is the list address to return to; empty on the item page. #}
+{% macro _hidden(csrf, back, to) %}
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  {% if back %}<input type="hidden" name="back" value="{{ back }}">{% endif %}
+  <input type="hidden" name="to" value="{{ to }}">
+{% endmacro %}
+
+{% macro prep_form(item, csrf, problems, back='') %}
+<form method="post" action="/items/{{ item.id }}/status" class="row">
+  {{ _hidden(csrf, back, 'prepped') }}
+  <button{% if problems %} disabled{% endif %}>Mark as prepped</button>
+  <span class="hint">{% if problems %}{{ problems|join('. ') }}.{% else %}Checked and ready to book.{% endif %}</span>
+</form>
+{% endmacro %}
+
+{% macro book_form(item, csrf, back='') %}
+{% set key = item.id[:12] %}
+<form method="post" action="/items/{{ item.id }}/status" class="stack boxed">
+  {{ _hidden(csrf, back, 'booked') }}
+  <label for="voucher-{{ key }}">Voucher number <span class="sub">(verifikationsnummer) in your bookkeeping service</span></label>
+  <input id="voucher-{{ key }}" name="voucher" maxlength="50" class="short" required
+         value="{{ (item.booking.voucher if item.booking else '') or '' }}" placeholder="A 12" autocomplete="off">
+  <label class="check"><input type="checkbox" name="receipt_attached" required> The receipt is attached to it there</label>
+  <div><button>Mark as booked</button></div>
+</form>
+{% endmacro %}
+
+{% macro skip_form(item, csrf, back='') %}
+{% set key = item.id[:12] %}
+<form method="post" action="/items/{{ item.id }}/status" class="stack boxed">
+  {{ _hidden(csrf, back, 'skipped') }}
+  <label for="skip-{{ key }}">Why it should not be booked</label>
+  <input id="skip-{{ key }}" name="skip_reason" maxlength="300" required
+         value="{{ item.skip_reason or '' }}" placeholder="Private purchase" autocomplete="off">
+  <div><button class="quiet">Skip</button></div>
+</form>
+{% endmacro %}
+
+{% macro reopen_form(item, csrf, back='') %}
+<form method="post" action="/items/{{ item.id }}/status" class="row">
+  {{ _hidden(csrf, back, 'new') }}
+  <button class="quiet">Back to new</button>
+  <span class="hint">{% if item.status == 'prepped' %}For unfinished changes.{% else %}Reopens the item. Nothing is removed.{% endif %}</span>
+</form>
+{% endmacro %}

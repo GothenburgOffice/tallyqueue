@@ -97,6 +97,13 @@ def _read_json(path: str):
         return json.load(f)
 
 
+def _read_item(path: str) -> dict:
+    """An item from disk with every fact present: one added in a later version reads as empty."""
+    item = _read_json(path)
+    item['facts'] = {name: item['facts'].get(name) for name in model.FACT_FIELDS}
+    return item
+
+
 # ---------------------------------------------------------------- receipt files
 def sniff(data: bytes, filename: str = '') -> tuple[str, str]:
     """(extension, media type) from the file's content. Raises for a type that is not accepted.
@@ -152,6 +159,7 @@ def add_item(
     ext, media = sniff(data, filename or '')
     item_id = hashlib.sha256(data).hexdigest()
     cleaned = model.clean_facts(facts or {})
+    settled = model.settle_sek({}, {name: cleaned.get(name) for name in model.FACT_FIELDS}, cleaned)
     stamp = now()
     item = {
         'id': item_id,
@@ -165,7 +173,7 @@ def add_item(
             'bytes': len(data),
         },
         'source': model.text(source, 'source', 300),
-        'facts': {name: cleaned.get(name) for name in model.FACT_FIELDS},
+        'facts': settled,
         'kontering': model.clean_kontering(kontering),
         'booking': None,
         'skip_reason': None,
@@ -175,7 +183,7 @@ def add_item(
     with _lock:
         path = _item_path(user, item_id)
         if os.path.exists(path):
-            return _read_json(path), False
+            return _read_item(path), False
         _write(_user_dir(user, 'receipts', f'{item_id}.{ext}'), data)
         _write_json(path, item)
     return item, True
@@ -201,7 +209,7 @@ def resolve(user: str, ref: str) -> str:
 
 
 def get_item(user: str, ref: str) -> dict:
-    return _read_json(_item_path(user, resolve(user, ref)))
+    return _read_item(_item_path(user, resolve(user, ref)))
 
 
 def all_items(user: str) -> list[dict]:
@@ -212,8 +220,8 @@ def all_items(user: str) -> list[dict]:
         if not name.endswith('.json'):
             continue
         try:
-            items.append(_read_json(os.path.join(folder, name)))
-        except (OSError, ValueError):
+            items.append(_read_item(os.path.join(folder, name)))
+        except (OSError, ValueError, KeyError, AttributeError):
             log.warning('Unreadable item file skipped: %s', name)
     items.sort(key=lambda i: (i['facts'].get('date') or '9999', i['created'], i['id']), reverse=True)
     return items
@@ -278,8 +286,9 @@ def update_item(
         what = []
         if facts:
             cleaned = model.clean_facts(facts)
-            changed = [k for k, v in cleaned.items() if item['facts'].get(k) != v]
-            item['facts'].update(cleaned)
+            was = item['facts']
+            item['facts'] = model.settle_sek(was, was | cleaned, cleaned)
+            changed = [k for k in model.FACT_FIELDS if was.get(k) != item['facts'].get(k)]
             if changed:
                 what.append(f'facts: {", ".join(changed)}')
         if kontering is not _KEEP:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import datetime
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 STATUSES = ('new', 'prepped', 'booked', 'skipped')
 KINDS = ('receipt', 'invoice', 'credit_note', 'other')
@@ -22,17 +22,23 @@ FACT_FIELDS = (
     'amount',
     'currency',
     'vat_amount',
+    'exchange_rate',
     'amount_sek',
+    'exchange_rate_source',
     'invoice_number',
     'due_date',
     'payment_date',
 )
+# The SEK side of a document in another currency. See settle_sek.
+SEK_SIDE = ('exchange_rate', 'amount_sek', 'exchange_rate_source')
 MAX_LINES = 40
 MAX_ACCOUNTS = 5000
 
 _DATES = ('date', 'due_date', 'payment_date')
 _MONEY = ('amount', 'vat_amount', 'amount_sek')
-_TEXT = {'counterparty': 200, 'description': 500, 'invoice_number': 100}
+_TEXT = {'counterparty': 200, 'description': 500, 'invoice_number': 100, 'exchange_rate_source': 100}
+_ORE = Decimal('0.01')
+_RATE_LIMIT = Decimal('100000')
 _ACCOUNT = re.compile(r'\d{4,6}')
 _CURRENCY = re.compile(r'[A-Z]{3}')
 _ISO_DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
@@ -71,6 +77,48 @@ def money(value, field: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise Invalid(f'{field}: write the amount as text, like "1250.00", not as a number')
+    try:
+        amount = _decimal(value)
+    except ValueError:
+        raise Invalid(f'{field}: "{value}" is not an amount. Write it like 1250.00') from None
+    if amount is None:
+        return None
+    if abs(amount) >= _LIMIT:
+        raise Invalid(f'{field}: "{value}" is not an amount. Write it like 1250.00')
+    # Counted in digits, not by value: "1,250" may be meant as 1250 and must not pass as 1.25.
+    if amount.as_tuple().exponent < -2:
+        raise Invalid(f'{field}: "{value}" has more than two decimals')
+    return f'{amount + 0:.2f}'  # + 0 turns -0 into 0
+
+
+def rate(value, field: str = 'exchange_rate') -> str | None:
+    """An exchange rate as text ("11.4235"), or None when it is empty.
+
+    The rate is SEK for one unit of the other currency. Text only, like an amount; up to eight
+    decimals, and more than zero.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise Invalid(f'{field}: write the rate as text, like "11.4235", not as a number')
+    try:
+        number = _decimal(value)
+    except ValueError:
+        number = Decimal(0)
+    if number is None:
+        return None
+    if not 0 < number < _RATE_LIMIT or number.as_tuple().exponent < -8:
+        raise Invalid(
+            f'{field}: "{value}" is not a rate. Write SEK for one unit of the currency, like 11.4235'
+        )
+    return format(number.normalize(), 'f')
+
+
+def _decimal(value: str) -> Decimal | None:
+    """The number written in a text, which may use a decimal comma and spaces ("1 250,50").
+
+    None when the text is empty. ValueError when it is not a number.
+    """
     raw = _SPACES.sub('', value).replace('−', '-')
     if not raw:
         return None
@@ -80,15 +128,12 @@ def money(value, field: str) -> str | None:
     else:
         raw = raw.replace(',', '.')
     try:
-        amount = Decimal(raw)
+        number = Decimal(raw)
     except InvalidOperation:
-        raise Invalid(f'{field}: "{value}" is not an amount. Write it like 1250.00') from None
-    if not amount.is_finite() or abs(amount) >= _LIMIT:
-        raise Invalid(f'{field}: "{value}" is not an amount. Write it like 1250.00')
-    # Counted in digits, not by value: "1,250" may be meant as 1250 and must not pass as 1.25.
-    if amount.as_tuple().exponent < -2:
-        raise Invalid(f'{field}: "{value}" has more than two decimals')
-    return f'{amount + 0:.2f}'  # + 0 turns -0 into 0
+        raise ValueError(value) from None
+    if not number.is_finite():
+        raise ValueError(value)
+    return number
 
 
 def iso_date(value, field: str) -> str | None:
@@ -119,6 +164,8 @@ def clean_facts(changes: dict) -> dict:
             out[key] = iso_date(value, key)
         elif key in _MONEY:
             out[key] = money(value, key)
+        elif key == 'exchange_rate':
+            out[key] = rate(value, key)
         elif key == 'currency':
             code = str(value).strip().upper()
             if not _CURRENCY.fullmatch(code):
@@ -131,6 +178,69 @@ def clean_facts(changes: dict) -> dict:
         else:
             out[key] = text(value, key, _TEXT[key])
     return out
+
+
+def to_sek(amount: str, exchange_rate: str) -> str:
+    """The amount at the rate, rounded to öre the usual way (half up)."""
+    return f'{(Decimal(amount) * Decimal(exchange_rate)).quantize(_ORE, rounding=ROUND_HALF_UP) + 0:.2f}'
+
+
+def settle_sek(before: dict, facts: dict, given) -> dict:
+    """The facts after a change, with their SEK side in order. `given` names the facts in the change.
+
+    Bookkeeping is in SEK. For a document in another currency the total in SEK comes one of two
+    ways, and whoever gives it says which:
+
+    - exchange_rate (SEK for one unit of the currency): amount_sek is worked out from it, and
+      worked out again whenever the amount or the rate changes.
+    - amount_sek as it is, for example what the card statement says was drawn: no rate is kept.
+
+    So a stored rate and a stored total in SEK never disagree. Where the figure comes from
+    (receipt, card statement, Riksbanken) goes in exchange_rate_source. Nothing here looks a
+    rate up: it is given, never guessed.
+    """
+    facts = dict(facts)
+
+    def given_now(name: str) -> bool:
+        return name in given and facts.get(name) is not None
+
+    currency = facts.get('currency')
+    if currency == 'SEK':
+        if any(given_now(name) for name in SEK_SIDE):
+            raise Invalid(
+                'The amount is already in SEK: leave exchange_rate, amount_sek and exchange_rate_source empty'
+            )
+        return facts | dict.fromkeys(SEK_SIDE)
+    if before.get('currency') not in (None, currency) and not given_now('exchange_rate'):
+        facts['exchange_rate'] = None  # the rate belonged to the other currency
+    amount = facts.get('amount')
+    if given_now('exchange_rate') and given_now('amount_sek'):
+        worked_out = to_sek(amount, facts['exchange_rate']) if amount is not None else None
+        if worked_out != facts['amount_sek']:
+            sum_ = f'{amount} × {facts["exchange_rate"]} = {worked_out}' if amount else 'there is no amount'
+            raise Invalid(
+                f'amount_sek {facts["amount_sek"]} is not the amount at the exchange_rate ({sum_}). Give one '
+                'of the two: amount_sek as the statement shows it, or exchange_rate'
+            )
+    elif given_now('amount_sek'):
+        facts['exchange_rate'] = None  # a total given as it is replaces one worked out from a rate
+    elif before.get('exchange_rate') is not None and facts.get('exchange_rate') is None:
+        facts['amount_sek'] = None  # it was worked out from the rate that is now gone
+    if facts.get('exchange_rate') is not None:
+        facts['amount_sek'] = to_sek(amount, facts['exchange_rate']) if amount is not None else None
+    had = before.get('exchange_rate') is not None or before.get('amount_sek') is not None
+    gone = facts.get('exchange_rate') is None and facts.get('amount_sek') is None
+    if had and gone and not given_now('exchange_rate_source'):
+        facts['exchange_rate_source'] = None  # nothing is left for it to be the source of
+    return facts
+
+
+def implied_rate(facts: dict) -> str | None:
+    """The rate that a total in SEK given as it is amounts to, to four decimals. For display only."""
+    amount, sek = facts.get('amount'), facts.get('amount_sek')
+    if facts.get('exchange_rate') or not amount or not sek or Decimal(amount) == 0:
+        return None
+    return str((Decimal(sek) / Decimal(amount)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP))
 
 
 def clean_kontering(value: dict | None) -> dict | None:
@@ -186,6 +296,11 @@ def prep_problems(item: dict) -> list[str]:
     missing = [name for name in ('date', 'amount', 'currency') if not facts.get(name)]
     if missing:
         problems.append(f'Missing facts: {", ".join(missing)}')
+    if facts.get('currency') not in (None, 'SEK') and not facts.get('amount_sek'):
+        problems.append(
+            f'The total in SEK is missing (the amount is in {facts["currency"]}): give exchange_rate, '
+            'or amount_sek as the card statement shows it'
+        )
     lines = (item.get('kontering') or {}).get('lines') or []
     if len(lines) < 2:
         problems.append('The kontering needs at least two lines')
@@ -221,17 +336,12 @@ def status_problems(item: dict, status: str) -> list[str]:
 def warnings(item: dict, accounts: list[dict], others: list[dict]) -> list[str]:
     """Things worth a second look. They never stop a save."""
     out = []
-    facts = item.get('facts') or {}
     kontering = item.get('kontering') or {}
     lines = kontering.get('lines') or []
     if lines:
         debit, credit = totals(kontering)
         if debit != credit:
             out.append(f'The kontering does not balance: debit {debit:.2f}, credit {credit:.2f}')
-        if facts.get('currency') not in (None, 'SEK') and not facts.get('amount_sek'):
-            out.append(
-                f'The amount is in {facts["currency"]} and amount_sek is empty: the kontering is in SEK'
-            )
         if accounts:
             known = {a['account'] for a in accounts}
             unknown = sorted({ln['account'] for ln in lines} - known)
