@@ -215,8 +215,9 @@ This path, from a real mail connector to TallyQueue, has not been tested yet.
   item each, readable as text), `users/<name>/receipts/<sha256>.<ext>` (the file as it arrived)
   and `users/<name>/accounts.json`. Back up the volume to back up TallyQueue.
 - Accepted files: PDF, PNG, JPEG, WebP, GIF, and UTF-8 text such as a saved mail.
-- Nothing is encrypted at rest and nothing is sent anywhere. The server makes no outgoing
-  requests.
+- Nothing is encrypted at rest. Nothing about your receipts or items is sent anywhere. The only
+  outgoing request is the Riksbanken rate lookup, when you ask for it, and it carries only the
+  currency code and dates; `RIKSBANK_LOOKUP=0` turns it off.
 - The receipts here are working copies. The archive that the law asks for is the one in your
   bookkeeping service: an item is not `booked` until you tick that the receipt is attached there.
 
