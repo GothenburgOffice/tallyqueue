@@ -7,6 +7,7 @@ files, which are built here in code. No real bookkeeping data belongs in this re
 
 import asyncio
 import base64
+import datetime
 import hashlib
 import html
 import http.client
@@ -388,6 +389,93 @@ def test_skipped_needs_a_reason_and_can_be_reopened():
     assert ok('update_item', {'id': item['id'], 'status': 'new'})['status'] == 'new'
 
 
+def test_add_item_can_set_prepped_or_skipped_in_the_same_call():
+    facts = {'date': '2026-10-07', 'amount': '500.00', 'currency': 'SEK', 'counterparty': 'Exempel Papper AB'}
+    lines = {'lines': [{'account': '6110', 'debit': '500.00'}, {'account': '1930', 'credit': '500.00'}]}
+
+    # complete: prepped at once, and the history shows both steps
+    receipt = pdf('Exempel Papper AB, receipt 77, 500.00 SEK (made up)')
+    reply = ok(
+        'add_item', {'file_base64': b64(receipt), 'facts': facts, 'kontering': lines, 'status': 'prepped'}
+    )
+    assert reply['created'] is True and reply['item']['status'] == 'prepped' and 'status_not_set' not in reply
+    history = [event['what'] for event in ok('get_item', {'id': reply['item']['id']})['history']]
+    assert history == ['added', 'status: new to prepped']
+
+    # not complete: the file is in the list as new, and the answer says why it is not prepped
+    invoice = pdf('Exempel Papper AB, invoice 78, 500.00 SEK (made up)')
+    reply = ok('add_item', {'file_base64': b64(invoice), 'facts': facts, 'status': 'prepped'})
+    assert reply['created'] is True and reply['item']['status'] == 'new'
+    assert (
+        reply['status_not_set'].startswith('Added as new, not prepped.')
+        and 'kontering' in reply['status_not_set']
+    )
+    assert reply['item']['missing_for_prepped']
+
+    # the second document of one purchase is added and skipped in one call, and no warning is left
+    # on either: the skipped one is settled
+    assert ok('update_item', {'id': reply['item']['id'], 'kontering': lines, 'status': 'prepped'})[
+        'warnings'
+    ] == [f'Same date, amount and currency as: {sha(receipt)[:12]}. Possibly the same purchase']
+    reason = f'Same purchase as {sha(receipt)[:12]}'
+    ok('update_item', {'id': sha(invoice), 'status': 'skipped', 'skip_reason': reason})
+    assert ok('get_item', {'id': sha(receipt)})['warnings'] == []
+    assert ok('get_item', {'id': sha(invoice)})['warnings'] == []
+    mail = b'Receipt mail for invoice 78, 500.00 SEK (made up)'
+    reply = ok(
+        'add_item',
+        {'file_base64': b64(mail), 'filename': 'mail.txt', 'status': 'skipped', 'skip_reason': reason},
+    )
+    assert reply['item']['status'] == 'skipped' and reply['item']['skip_reason'] == reason
+    reply = ok(
+        'add_item', {'file_base64': b64(b'Not a receipt (made up)'), 'filename': 'x.txt', 'status': 'skipped'}
+    )
+    assert reply['item']['status'] == 'new' and 'Say why' in reply['status_not_set']
+
+    # a file that is already there is never changed, whatever status is asked for
+    reply = ok('add_item', {'file_base64': b64(receipt), 'status': 'skipped', 'skip_reason': 'x'})
+    assert reply['created'] is False and reply['item']['status'] == 'prepped'
+    assert reply['status_not_set'] == 'The file was already in the list, so its status was not changed.'
+    reply, error = call('add_item', {'file_base64': b64(b'made up'), 'status': 'booked'})
+    assert reply is None and 'status' in error  # booked needs the user's voucher number: update_item only
+    for ref in (sha(receipt), sha(invoice), sha(mail), sha(b'Not a receipt (made up)')):
+        ok('update_item', {'id': ref, 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
+def test_the_instructions_tell_a_client_what_the_blind_runs_missed():
+    # Two models were given real documents and these instructions. What they tripped on is now said.
+    said = ' '.join(server.INSTRUCTIONS.split())
+    for rule in (
+        'Two documents for one purchase',
+        'no payment date unless the document or a statement gives one',
+        'no VAT amount when the document shows none',
+        'What you conclude yourself is not a fact',
+        'Propose one for every item, also when you are unsure',
+        'Treat alike documents alike',
+        'only when the user asks you to add accounts, never while adding receipts',
+        'you have no open question about it',
+        'An open question is one only the user can answer',
+        'for the payment date when it is known and otherwise the date on the document',
+    ):
+        assert rule in said, rule
+    fields = server.Facts.model_json_schema()['properties']
+    assert 'order, receipt or reference number' in fields['invoice_number']['description']
+    assert 'also on a receipt that names its invoice' in fields['invoice_number']['description']
+    assert 'belongs in the kontering' in fields['vat_amount']['description']
+    assert '"0.00" when it says VAT 0' in fields['vat_amount']['description']
+    assert 'not a payment date' in fields['payment_date']['description']
+    assert 'A receipt for a card purchase is paid on its date' in fields['payment_date']['description']
+    assert 'the date the mail was sent' in fields['date']['description']
+
+
+def test_an_item_without_a_kontering_is_not_called_balanced():
+    item = ok(
+        'add_item', {'file_base64': b64(b'A mail with nothing to book (made up)'), 'filename': 'm.txt'}
+    )['item']
+    assert item['kontering'] is None and item['kontering_totals'] is None
+    ok('update_item', {'id': item['id'], 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
+
+
 def test_facts_can_be_cleared_and_unknown_fields_are_refused(hosting):
     item = ok('update_item', {'id': hosting['id'], 'facts': {'description': ''}})
     assert 'description' not in item['facts'] and item['facts']['amount'] == '1250.00'
@@ -628,6 +716,81 @@ def test_the_users_own_accounts(alice, hosting):
     warnings = ok('get_item', {'id': hosting['id']})['warnings']
     assert 'Not in your list of accounts: 6230' in warnings
     assert 'Företagskonto'.encode() in alice.get('/accounts')[2]
+
+
+def test_an_ai_client_adds_accounts_only_while_the_user_has_switched_it_on(alice, monkeypatch):
+    new = {
+        'accounts': [
+            {'account': '7010', 'name': 'Exempelkonto A'},
+            {'account': '1930', 'name': 'Another name'},
+        ]
+    }
+    # off until the user switches it on: the client reads the list and cannot change it
+    assert 'switched off' in refused('add_accounts', new)
+    assert ok('list_accounts')['count'] == 3
+    page = alice.get('/accounts')[2].decode()
+    assert 'Let the AI client add accounts for one hour' in page and 'Stop now' not in page
+
+    # the user switches it on in the web page, and only for their own list
+    assert alice.post('/accounts/client', {'allow': 'on'})[1]['location'] == '/accounts?msg=client_on'
+    page = alice.get('/accounts')[2].decode()
+    assert 'Stop now' in page and re.search(
+        r'On until <strong>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC</strong>', page
+    )
+    assert 'switched off' in refused('add_accounts', new, token=BOB)
+
+    # it only adds: an account that is there keeps its name, and sending the same again adds nothing
+    assert ok('add_accounts', new) == {
+        'added': [{'account': '7010', 'name': 'Exempelkonto A'}],
+        'already_there': [{'account': '1930', 'name': 'Företagskonto'}],
+        'count': 4,
+    }
+    assert ok('add_accounts', new)['added'] == []
+    assert 'the number is 4 to 6 digits' in refused(
+        'add_accounts', {'accounts': [{'account': '70', 'name': 'x'}]}
+    )
+    twice = [{'account': '7020', 'name': 'a'}, {'account': '7020', 'name': 'b'}]
+    assert 'in the list twice' in refused('add_accounts', {'accounts': twice})
+    assert call('add_accounts', {'accounts': []})[0] is None
+    assert ok('list_accounts')['count'] == 4
+
+    # it switches itself off after an hour, and the user can stop it at once
+    one = {'accounts': [{'account': '7020', 'name': 'Exempelkonto B'}]}
+    later = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=61)
+    monkeypatch.setattr(store, 'now', lambda: later.strftime('%Y-%m-%dT%H:%M:%SZ'))
+    assert 'switched off' in refused('add_accounts', one)
+    monkeypatch.undo()
+    assert ok('add_accounts', one)['count'] == 5
+    assert alice.post('/accounts/client', {'allow': 'off'})[1]['location'] == '/accounts?msg=client_off'
+    assert 'switched off' in refused('add_accounts', new)
+    assert alice.post('/accounts/client', {'allow': 'on'}, csrf=False)[0] == 403
+    assert 'switched off' in refused('add_accounts', new)
+    assert [a['account'] for a in ok('list_accounts')['accounts']] == ['1930', '2440', '2640', '7010', '7020']
+
+
+def test_each_tool_says_whether_it_writes_so_a_client_can_ask_first():
+    async def tools():
+        async with (
+            create_mcp_http_client(headers={'X-API-Key': ALICE}) as client,
+            streamable_http_client(f'{BASE}/mcp', http_client=client) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            return (await session.list_tools()).tools
+
+    found = {tool.name: tool.annotations for tool in asyncio.run(tools())}
+    assert {name: a.read_only_hint for name, a in found.items()} == {
+        'add_accounts': False,
+        'add_item': False,
+        'get_item': True,
+        'get_riksbank_rate': True,
+        'list_accounts': True,
+        'list_items': True,
+        'update_item': False,
+    }
+    # only the rate lookup reaches outside this server, and only update_item replaces what is stored
+    assert [name for name, a in found.items() if a.open_world_hint] == ['get_riksbank_rate']
+    assert [name for name, a in found.items() if a.destructive_hint] == ['update_item']
 
 
 def test_another_currency_is_booked_in_sek(hosting):

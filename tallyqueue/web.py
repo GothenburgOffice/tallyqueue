@@ -48,6 +48,8 @@ FLASH = {
     'duplicate': 'That file is already in the list. This is the item; nothing was changed.',
     'deleted': 'The item and its receipt were deleted.',
     'accounts': 'Your list of accounts was saved.',
+    'client_on': 'The AI client may now add accounts to your list. It stops by itself after an hour.',
+    'client_off': 'The AI client can no longer add accounts.',
     'rate': "Riksbanken's rate was fetched and saved with the facts. Check that it is for the date you want.",
 }
 TABS = (
@@ -67,7 +69,7 @@ FACT_LABELS = {
     'currency': 'Currency',
     'vat_amount': 'VAT (moms)',
     # The SEK side (model.SEK_SIDE) has its own block in the form, shown for another currency.
-    'invoice_number': 'Invoice number',
+    'invoice_number': 'Invoice, order or receipt number',
     'due_date': 'Due date',
     'payment_date': 'Paid on',
 }
@@ -459,6 +461,7 @@ async def accounts(request: Request) -> Response:
         session,
         source=source,
         count=len(current),
+        client_until=await _run(store.accounts_from_client_until, session.user),
         flash=FLASH.get(request.query_params.get('msg', '')),
     )
 
@@ -471,8 +474,19 @@ async def save_accounts(request: Request) -> Response:
     try:
         await _run(store.write_accounts, session.user, source)
     except (store.StoreError, model.Invalid) as e:
-        return _page('accounts.html', session, 422, source=source, count=0, error=str(e))
+        until = await _run(store.accounts_from_client_until, session.user)
+        return _page('accounts.html', session, 422, source=source, count=0, client_until=until, error=str(e))
     return _redirect('/accounts?msg=accounts')
+
+
+async def accounts_from_client(request: Request) -> Response:
+    """The user's own switch for letting an AI client add accounts. Off until the user turns it on."""
+    session, form, refusal = await _post(request)
+    if refusal:
+        return refusal
+    allowed = form.get('allow') == 'on'
+    await _run(store.allow_accounts_from_client, session.user, allowed)
+    return _redirect(f'/accounts?msg={"client_on" if allowed else "client_off"}')
 
 
 # ---------------------------------------------------------------- static
@@ -503,6 +517,7 @@ ROUTES = (
     ('/receipts/{id}', ['GET'], receipt),
     ('/accounts', ['GET'], accounts),
     ('/accounts', ['POST'], save_accounts),
+    ('/accounts/client', ['POST'], accounts_from_client),
     ('/static/{name}', ['GET'], static),
     ('/robots.txt', ['GET'], robots),
 )

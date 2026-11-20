@@ -5,6 +5,7 @@
     DATA_DIR/users/<user>/items/<sha256>.json      the item: facts, proposed kontering, status, history
     DATA_DIR/users/<user>/receipts/<sha256>.<ext>  the receipt file as it arrived (a working copy)
     DATA_DIR/users/<user>/accounts.json            the user's own list of accounts, if they gave one
+    DATA_DIR/users/<user>/settings.json            what the user has switched on, such as accounts from a client
 
 An item's id is the SHA-256 of its receipt file, so the same file added twice is one item.
 The receipt kept here is a working copy. The archive that the law asks for is the one in the
@@ -370,3 +371,60 @@ def write_accounts(user: str, source: str) -> list[dict]:
     with _lock:
         _write_json(_user_dir(user, 'accounts.json'), accounts)
     return accounts
+
+
+# An AI client can read the list of accounts but not change it, unless the user switches that on.
+# The switch turns itself off: adding accounts is asked for on purpose, never part of everyday use.
+ACCOUNTS_FROM_CLIENT_MINUTES = 60
+
+
+def accounts_from_client_until(user: str) -> str | None:
+    """Until when an AI client may add accounts for this user, or None when it may not."""
+    path = _user_dir(user, 'settings.json')
+    if not os.path.exists(path):
+        return None
+    try:
+        until = _read_json(path).get('accounts_from_client_until')
+    except (OSError, ValueError, AttributeError):
+        log.warning('Unreadable settings file for %s', user)
+        return None
+    return until if isinstance(until, str) and until > now() else None
+
+
+def allow_accounts_from_client(user: str, allowed: bool) -> str | None:
+    """Switch it on for ACCOUNTS_FROM_CLIENT_MINUTES, or off. Returns until when it is on."""
+    until = None
+    if allowed:
+        end = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=ACCOUNTS_FROM_CLIENT_MINUTES)
+        until = end.strftime('%Y-%m-%dT%H:%M:%SZ')
+    with _lock:
+        _write_json(_user_dir(user, 'settings.json'), {'accounts_from_client_until': until})
+    return until
+
+
+def add_accounts(user: str, accounts: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Add the accounts an AI client sends: (added, already there). Only while the user allows it.
+
+    It only adds. An account that is in the list keeps its name; changing and removing accounts
+    is done in the web page.
+    """
+    new = model.clean_accounts(accounts)
+    with _lock:
+        if not accounts_from_client_until(user):
+            raise StoreError(
+                'Adding accounts is switched off. The user switches it on in the web page, under '
+                'Accounts, when they want accounts added. Do not ask them to unless they asked for that.'
+            )
+        current = {a['account']: a['name'] for a in read_accounts(user)}
+        added = [a for a in new if a['account'] not in current]
+        already = [
+            {'account': a['account'], 'name': current[a['account']]} for a in new if a['account'] in current
+        ]
+        if len(current) + len(added) > model.MAX_ACCOUNTS:
+            raise StoreError(f'At most {model.MAX_ACCOUNTS} accounts')
+        if added:
+            merged = current | {a['account']: a['name'] for a in added}
+            _write_json(
+                _user_dir(user, 'accounts.json'), [{'account': n, 'name': merged[n]} for n in sorted(merged)]
+            )
+    return added, already

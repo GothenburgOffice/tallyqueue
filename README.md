@@ -153,6 +153,12 @@ Under **Accounts** you paste the accounts you use, one per line (`1930 Företags
 file can be pasted as it is; only its `#KONTO` lines are read. TallyQueue then warns when a
 kontering uses an account that is not in your list, and the AI client can ask for the list.
 
+The AI client cannot change the list, unless you switch that on. On the same page, "Let the AI
+client add accounts for one hour" lets it add accounts when you ask it to, for example from the
+chart in your bookkeeping service. It can only add: an account that is in the list keeps its
+name and nothing is removed. The switch turns itself off after an hour, so the client never
+adds accounts while it is only handling receipts.
+
 The pages use no JavaScript.
 
 ## Connect an AI client
@@ -177,17 +183,29 @@ The single quotes store the placeholder, and `claude` fills it in from the envir
 
 | Tool | What it does |
 |---|---|
-| `add_item` | Adds a receipt or invoice file, with the facts read from it and a proposed kontering. The same file again changes nothing |
+| `add_item` | Adds a receipt or invoice file, with the facts read from it and a proposed kontering, as new or straight to prepped or skipped. The same file again changes nothing |
 | `list_items` | The list, by status (`todo` is new and prepped) or by text, with a count per status |
 | `get_item` | One item in full, with what is missing, warnings and its history |
 | `update_item` | Changes the facts, the proposed kontering, the status or the notes |
 | `list_accounts` | Your own list of accounts, if you have pasted one |
+| `add_accounts` | Adds accounts to your list. Refused unless you have switched it on in the web page, which lasts an hour |
 | `get_riksbank_rate` | Riksbanken's rate for a currency on a date. Stores nothing; the client gives the rate to `update_item` |
 
-The tool descriptions tell the client the rules: only facts that are on the document, amounts as
-text with two decimals, a kontering in SEK that balances, for another currency the exchange rate
-or the total in SEK with its source, and booked only when you give the voucher number. A client
-can add and change items but not delete them.
+The server's instructions and the tool descriptions tell the client the rules:
+
+- Facts are only what the document says: no payment date unless the document or a statement
+  gives one, no VAT amount when the document shows none. Amounts are text with two decimals.
+- What the client concludes itself, such as how VAT applies or which accounts fit, is not a fact.
+  It goes in the kontering as a proposal, with what the client was unsure about.
+- Every item gets a proposed kontering, also when the client is unsure: what is open goes in its
+  note, and alike documents are treated alike. It is in SEK and balances. For another currency
+  the client gives the exchange rate or the total in SEK, with its source.
+- Two documents for one purchase, such as an invoice and its receipt, are both added. One carries
+  the facts and the kontering, and the other is skipped with a reason that names it.
+- An item is marked prepped only when the client has no open question about it, and booked only
+  when you give the voucher number.
+
+A client can add and change items but not delete them.
 
 Then ask, for example: *"Go through my mail from October, find receipts and invoices for my
 business, and add each one to TallyQueue with its facts and a proposed kontering."*
@@ -212,8 +230,9 @@ This path, from a real mail connector to TallyQueue, has not been tested yet.
 ## Your data
 
 - Everything is in the `data` volume, as ordinary files: `users/<name>/items/<sha256>.json` (one
-  item each, readable as text), `users/<name>/receipts/<sha256>.<ext>` (the file as it arrived)
-  and `users/<name>/accounts.json`. Back up the volume to back up TallyQueue.
+  item each, readable as text), `users/<name>/receipts/<sha256>.<ext>` (the file as it arrived),
+  `users/<name>/accounts.json` and `users/<name>/settings.json` (what you have switched on). Back
+  up the volume to back up TallyQueue.
 - Accepted files: PDF, PNG, JPEG, WebP, GIF, and UTF-8 text such as a saved mail.
 - Nothing is encrypted at rest. Nothing about your receipts or items is sent anywhere. The only
   outgoing request is the Riksbanken rate lookup, when you ask for it, and it carries only the

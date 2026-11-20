@@ -347,9 +347,11 @@ def warnings(item: dict, accounts: list[dict], others: list[dict]) -> list[str]:
             unknown = sorted({ln['account'] for ln in lines} - known)
             if unknown:
                 out.append(f'Not in your list of accounts: {", ".join(unknown)}')
-    twins = [o['id'][:12] for o in others if _same_purchase(item, o)]
-    if twins:
-        out.append(f'Same date, amount and currency as: {", ".join(twins)}. Possibly the same purchase')
+    # A skipped item is settled: it is no twin to warn about, and needs no such warning itself.
+    if item.get('status') != 'skipped':
+        twins = [o['id'][:12] for o in others if o.get('status') != 'skipped' and _same_purchase(item, o)]
+        if twins:
+            out.append(f'Same date, amount and currency as: {", ".join(twins)}. Possibly the same purchase')
     return out
 
 
@@ -358,6 +360,23 @@ def _same_purchase(a: dict, b: dict) -> bool:
         return False
     fa, fb = a.get('facts') or {}, b.get('facts') or {}
     return all(fa.get(k) and fa.get(k) == fb.get(k) for k in ('date', 'amount', 'currency'))
+
+
+def clean_accounts(accounts) -> list[dict]:
+    """Accounts given one by one, as number and name, checked. Each number once."""
+    if not isinstance(accounts, list) or not accounts:
+        raise Invalid('accounts: expected a list of accounts, each with its number and name')
+    out: dict[str, str] = {}
+    for n, raw in enumerate(accounts, 1):
+        if not isinstance(raw, dict):
+            raise Invalid(f'Account {n}: expected account and name')
+        number = str(raw.get('account') or '').strip()
+        if not re.fullmatch(r'\d{4,6}', number):
+            raise Invalid(f'Account {n}: the number is 4 to 6 digits, like "1930"')
+        if number in out:
+            raise Invalid(f'Account {n}: {number} is in the list twice')
+        out[number] = text(raw.get('name') or '', f'Account {n} name', 200) or ''
+    return [{'account': number, 'name': out[number]} for number in sorted(out)]
 
 
 _ACCOUNT_LINE = re.compile(r'(\d{4,6})(?:[\s;,:=\-–]+(.*))?')
