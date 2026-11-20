@@ -59,9 +59,40 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode('utf-8')).hexdigest()
 
 
+def token_problem(token: str) -> str | None:
+    """What keeps this text from being a token at all, or None when it has a token's shape."""
+    if not token.startswith(TOKEN_PREFIX):
+        return f'it does not start with {TOKEN_PREFIX}'
+    if len(token) < MIN_TOKEN_LENGTH:
+        return f'it is {len(token)} characters long'
+    return None
+
+
+def why_refused(token: str) -> str:
+    """Why a token was refused, for the one who sent it. It never repeats the token.
+
+    Two different mistakes get two different answers: text that is not a token at all, and a
+    token that no entry in TALLYQUEUE_USERS was made from. The shape of a token is no secret
+    (it is in this file), and neither answer says anything about the tokens that do work.
+    """
+    if not token:
+        return 'No token was sent.'
+    problem = token_problem(token)
+    if problem:
+        return (
+            f'That is not a TallyQueue token: {problem}. A token starts with {TOKEN_PREFIX} and is at '
+            f'least {MIN_TOKEN_LENGTH} characters long. The operator makes one with: '
+            'python -m tallyqueue token <name>'
+        )
+    return (
+        'That token is not approved: no entry in TALLYQUEUE_USERS is the SHA-256 of it. An entry '
+        'is the pair that "python -m tallyqueue token <name>" printed with the token.'
+    )
+
+
 def user_for_token(token: str) -> str | None:
     """The approved user this token belongs to, or None."""
-    if not token.startswith(TOKEN_PREFIX) or len(token) < MIN_TOKEN_LENGTH:
+    if token_problem(token):
         return None
     digest = hash_token(token)
     found = None

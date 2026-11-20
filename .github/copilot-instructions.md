@@ -80,7 +80,9 @@ or a pull request, and report only checks that actually ran.
   Every function takes the user first and never reads another user's folder. Writes are whole
   files (temporary file, then rename) under one lock.
 - `tallyqueue/auth.py`: approved users (`TALLYQUEUE_USERS`, only SHA-256 of each token), web
-  sessions in memory. Tokens are 256 random bits and shorter ones are refused; there is no
+  sessions in memory. Tokens are 256 random bits and start with `tq_`; anything else is
+  refused, also when its SHA-256 is listed. A refusal says why (`auth.why_refused`: not a
+  token, or a token no entry was made from) and never repeats what was sent. There is no
   sign-in throttle, on purpose (a stranger could use it to lock the owner out).
 - `tallyqueue/config.py`: settings from the environment and the Host and Origin checks.
   `PUBLIC_URL` is the one source for links, the allowed host and origin, and the Secure cookie.

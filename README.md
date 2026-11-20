@@ -88,6 +88,10 @@ cp .env.example .env
    Put the `owner:…` pair it prints in `TALLYQUEUE_USERS` in `.env`. The server keeps only that
    SHA-256, never the token. To approve another user later, add a pair, separated by a comma.
    With `TALLYQUEUE_USERS` empty, nobody can sign in.
+
+   Only a token made by this command works. It starts with `tq_`; a password of your own is
+   refused even when its SHA-256 is in `TALLYQUEUE_USERS`. A refused sign-in says which of the
+   two it is: text that is not a token, or a token that no entry was made from.
 3. Start it:
 
    ```bash
