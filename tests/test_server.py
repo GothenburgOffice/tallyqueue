@@ -235,11 +235,23 @@ def test_health_is_open_and_says_nothing_private():
     assert status == 200 and json.loads(body)['status'] == 'ok'
 
 
-@pytest.mark.parametrize('headers', [{}, {'X-API-Key': 'tq_wrong'}, {'X-API-Key': '${TALLYQUEUE_TOKEN}'}])
-def test_mcp_refuses_requests_without_an_approved_token(headers):
+@pytest.mark.parametrize(
+    ('headers', 'why'),
+    [
+        ({}, 'No token was sent'),
+        ({'X-API-Key': '${TALLYQUEUE_TOKEN}'}, 'No token was sent'),
+        ({'X-API-Key': 'tq_wrong'}, 'not a TallyQueue token: it is 8 characters long'),
+        ({'X-API-Key': 'my-own-password-that-is-long-enough-to-be-one'}, 'it does not start with tq_'),
+        ({'X-API-Key': 'tq_' + 'x' * 43}, 'no entry in TALLYQUEUE_USERS is the SHA-256 of it'),
+    ],
+)
+def test_mcp_refuses_requests_without_an_approved_token_and_says_why(headers, why):
     body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
     status, _, reply = fetch('POST', '/mcp', body, {'Content-Type': 'application/json', **headers})
-    assert status == 401 and b'unauthorized' in reply
+    error = json.loads(reply)['error']
+    assert status == 401 and error.startswith('unauthorized: ') and why in error
+    # the refusal never repeats what was sent
+    assert headers.get('X-API-Key', 'nothing sent') not in error
 
 
 def test_bearer_token_works_too():
@@ -261,7 +273,11 @@ def test_only_full_length_tokens_are_accepted():
     auth.USERS['mallory'] = hashlib.sha256(short.encode()).hexdigest()
     try:
         assert auth.user_for_token(short) is None
-        assert fetch('POST', '/upload', png(), {'X-API-Key': short})[0] == 401
+        status, _, reply = fetch('POST', '/upload', png(), {'X-API-Key': short})
+        assert status == 401 and b'not a TallyQueue token: it is 10 characters long' in reply
+        # the sign-in page says the same, so a listed hash does not leave its owner guessing
+        status, _, body = Browser().sign_in(short)
+        assert status == 401 and b'not a TallyQueue token: it is 10 characters long' in body
     finally:
         del auth.USERS['mallory']
     assert auth.user_for_token(ALICE) == 'alice' and auth.user_for_token(ALICE[3:]) is None
@@ -428,7 +444,14 @@ def test_pages_need_a_sign_in():
 def test_sign_in_refuses_a_wrong_token_and_never_redirects_off_site():
     browser = Browser()
     status, _, body = browser.sign_in('tq_wrong')
-    assert status == 401 and b'not approved' in body and not browser.cookie
+    assert status == 401 and b'not a TallyQueue token: it is 8 characters long' in body and not browser.cookie
+    # Text that is not a token and a token nobody has are two mistakes, and each is named.
+    status, _, body = browser.sign_in('correct horse battery staple, forty characters')
+    assert status == 401 and b'it does not start with tq_' in body and b'correct horse' not in body
+    unknown = 'tq_' + 'x' * 43
+    status, _, body = browser.sign_in(unknown)
+    assert status == 401 and b'no entry in TALLYQUEUE_USERS is the SHA-256 of it' in body
+    assert unknown.encode() not in body and not browser.cookie
     status, headers, _ = browser.post('/login', {'token': ALICE, 'next': '//attacker.example/x'}, csrf=False)
     assert status == 303 and headers['location'] == '/items'
     status, headers, _ = Browser().post('/login', {'token': ALICE, 'next': '/accounts'}, csrf=False)
