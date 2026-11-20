@@ -85,7 +85,7 @@ or a pull request, and report only checks that actually ran.
 - `tallyqueue/config.py`: settings from the environment and the Host and Origin checks.
   `PUBLIC_URL` is the one source for links, the allowed host and origin, and the Secure cookie.
 - `tallyqueue/server.py`: the MCP tools (`add_item`, `list_items`, `get_item`, `update_item`,
-  `list_accounts`, `get_riksbank_rate`), `POST /upload`, `/health`, and `build_app()`, which
+  `list_accounts`, `add_accounts`, `get_riksbank_rate`), `POST /upload`, `/health`, and `build_app()`, which
   wraps the app with the host check, the token check on `/mcp` and the default response headers.
 - `tallyqueue/riksbank.py`: Riksbanken's published rate for a currency on a date, fetched on
   request and remembered in memory.
@@ -124,6 +124,22 @@ or a pull request, and report only checks that actually ran.
   user goes out. Tests stand in for the network (`riksbank._get`) and never call Riksbanken.
 - **Every status can be changed by hand in the web page**, in the list and on the item's page,
   through the same forms (`templates/_macros.html`). The AI client is never the only way.
+- **What an AI client is told lives in `server.INSTRUCTIONS`, the `Facts` field descriptions and
+  the tool descriptions**, and it keeps facts apart from conclusions. A fact is what the document
+  says; how VAT applies, which accounts fit and whether a purchase belongs to the business are
+  proposals in the kontering. An item is prepped only when the client has no open question about
+  it. These texts were changed after two models were run blind on real documents: before
+  rewording them, think about what a client that sees nothing else will do.
+- **A skipped item is settled.** It is no twin for the "possibly the same purchase" warning, and
+  gets no such warning itself (`model.warnings`).
+- **An AI client proposes a kontering for every item**, also when it is unsure, and treats alike
+  documents alike. An empty kontering is not a way to say "I was unsure": the note is.
+- **An AI client cannot change the list of accounts, unless the user has switched that on.** The
+  switch is the user's own, in the web page; it lasts `store.ACCOUNTS_FROM_CLIENT_MINUTES` and
+  then turns itself off (`store.accounts_from_client_until`). `add_accounts` only adds: it never
+  renames or removes. Never make it part of adding receipts, and never widen it to replace the
+  list. Each tool carries annotations that say whether it writes, so a client can ask the user
+  first.
 - **A duplicate file never overwrites** what is stored.
 - **No JavaScript on the pages.** The page policy is `default-src 'none'` with styles, images
   and frames from this origin only. Templates autoescape; never mark user text as safe.

@@ -15,4 +15,25 @@
   <p class="hint">Saving replaces the whole list. A SIE file can be pasted as it is: only its
   <code>#KONTO</code> lines are read. The list stays on this server, in your own data folder.</p>
 </section>
+
+<section class="narrow wide">
+  <h2>Accounts from the AI client</h2>
+  {% if client_until %}
+  <p>On until <strong>{{ client_until|replace('T', ' ')|replace('Z', ' UTC') }}</strong>. The AI client
+  may add accounts to this list when you ask it to. It can only add: an account that is here keeps
+  its name, and nothing is removed.</p>
+  <form method="post" action="/accounts/client">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <button name="allow" value="off" class="quiet">Stop now</button>
+  </form>
+  {% else %}
+  <p>Off. The AI client can read this list but not change it. Switch this on when you ask the
+  client to add accounts for you. It switches itself off after an hour, so the client never adds
+  accounts while it is only handling receipts.</p>
+  <form method="post" action="/accounts/client">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <button name="allow" value="on" class="quiet">Let the AI client add accounts for one hour</button>
+  </form>
+  {% endif %}
+</section>
 {% endblock %}

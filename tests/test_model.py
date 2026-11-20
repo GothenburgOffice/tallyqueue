@@ -154,6 +154,39 @@ def test_warnings_point_at_things_worth_a_second_look():
     assert model.warnings(item(), [], []) == []
 
 
+def test_accounts_given_one_by_one_are_checked():
+    given = [{'account': ' 2640 ', 'name': '  Ingående   moms '}, {'account': '1930', 'name': ''}]
+    assert model.clean_accounts(given) == [
+        {'account': '1930', 'name': ''},
+        {'account': '2640', 'name': 'Ingående moms'},
+    ]
+    for bad in (
+        [],
+        'x',
+        [{'account': '19', 'name': 'a'}],
+        [{'account': '1930'}, {'account': '1930'}],
+        ['1930 Bank'],
+    ):
+        with pytest.raises(model.Invalid):
+            model.clean_accounts(bad)
+    with pytest.raises(model.Invalid):
+        model.clean_accounts([{'account': '1930', 'name': 'x' * 201}])
+
+
+def test_a_skipped_item_is_no_twin_to_warn_about():
+    # Two documents for one purchase: one is skipped, and the warning has done its work.
+    facts = {'date': '2026-10-03', 'amount': '100.00', 'currency': 'EUR'}
+    kept = item(facts=facts)
+    skipped = item(id='b' * 64, facts=facts, status='skipped', skip_reason='Same purchase as aaaaaaaaaaaa')
+    assert model.warnings(kept, [], [kept, skipped]) == []
+    assert model.warnings(skipped, [], [kept, skipped]) == []
+    # a third document with the same figures that is not skipped is still pointed at
+    third = item(id='c' * 64, facts=facts)
+    assert any(
+        'cccccccccccc' in w and 'bbbb' not in w for w in model.warnings(kept, [], [kept, skipped, third])
+    )
+
+
 # ---------------------------------------------------------------- another currency than SEK
 @pytest.mark.parametrize(
     ('given', 'expected'),

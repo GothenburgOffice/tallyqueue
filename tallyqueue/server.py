@@ -22,7 +22,7 @@ import anyio
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp_types import TextContent
+from mcp_types import TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -34,23 +34,47 @@ It is a helper, not a ledger: the user does the bookkeeping in their own bookkee
 checks every figure first.
 
 - For each receipt or invoice you find (for example in the user's mail), add it once: add_item with
-  the file, or POST the file to /upload and then update_item. An item's id is the SHA-256 of its
-  file, so adding the same file again changes nothing.
-- Give only facts that are on the document. Leave a fact out rather than guess. Amounts are
-  strings with two decimals ("1250.00").
-- The kontering is a proposal for the user to check, in SEK, and it must balance. Use accounts
-  from list_accounts when the user has supplied their list. Put what you were unsure about in
-  kontering.note. You give no accounting or tax advice.
+  the file in file_base64, or POST the file to /upload and then update_item. An item's id is the
+  SHA-256 of its file, so adding the same file again changes nothing.
+- Two documents for one purchase, such as an invoice and its receipt: add both, so that both files
+  are kept. Put the facts and the kontering on the one that shows the payment, and skip the other
+  with a reason that names the first.
+- Facts are what the document says, and nothing else. Leave a fact out rather than guess: no
+  payment date unless the document or a statement gives one, and no VAT amount when the document
+  shows none. Amounts are strings with two decimals ("1250.00").
+- What you conclude yourself is not a fact: how VAT applies, which accounts fit, whether a purchase
+  belongs to the business. Put it in the kontering (vat_treatment and note) as a proposal, with
+  what you were unsure about. You give no accounting or tax advice, and TallyQueue has no rules
+  for VAT or accounts: the user decides.
+- The kontering is a proposal for the user to check, in SEK, and it must balance. Propose one for
+  every item, also when you are unsure: an empty kontering helps nobody, and what is open goes in
+  its note. Treat alike documents alike. Use accounts from list_accounts when the user has
+  supplied their list.
+- The list of accounts is the user's own. Add to it with add_accounts only when the user asks you
+  to add accounts, never while adding receipts. It works only while the user has switched it on
+  in the web page.
 - The books are kept in SEK. For a document in another currency, give the total in SEK one of two
   ways: amount_sek as it is, when the receipt or the card or bank statement shows what was drawn;
   or exchange_rate (SEK for one unit of the currency), and amount_sek is worked out from it. When
-  neither the receipt nor a statement gives it, get Riksbanken's rate with get_riksbank_rate. Always
-  say where the figure comes from in exchange_rate_source. Never estimate a rate.
-- Statuses: new, then prepped (facts and a balanced kontering are in place), then booked (the user
-  booked it in their bookkeeping service). Mark an item booked only when the user tells you the
-  voucher number and that the receipt is attached there. Use skipped, with a reason, for what
-  should not be booked.
+  neither the receipt nor a statement gives it, get Riksbanken's rate with get_riksbank_rate, for
+  the payment date when it is known and otherwise the date on the document. Always say where the
+  figure comes from in exchange_rate_source. Never estimate a rate.
+- Statuses: an added item is new. Mark it prepped only when the facts and a balanced kontering are
+  in place and you have no open question about it; with a doubt, leave it new and say what is
+  open. Booked means the user booked it in their bookkeeping service: mark it only when the user
+  tells you the voucher number and that the receipt is attached there. Use skipped, with a
+  reason, for what should not be booked.
 """
+
+# What each tool does to the user's data, for clients that ask the user before a tool that writes.
+_READS = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+_ADDS = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+)
+_CHANGES = ToolAnnotations(
+    read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
+)
+_LOOKS_UP = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 
 # Amounts are text in the schema too, so a client is never invited to send a float.
 Amount = str | None
@@ -71,7 +95,12 @@ class Facts(BaseModel):
         'Negative for a credit note.',
     )
     currency: str | None = Field(None, description='Three-letter code: SEK, EUR, USD.')
-    vat_amount: Amount = Field(None, description='VAT on the document, in the document currency.')
+    vat_amount: Amount = Field(
+        None,
+        description='VAT as the document shows it, in the document currency. Leave out when the '
+        'document shows none. Under reverse charge the document shows 0 or nothing: the VAT you '
+        'work out belongs in the kontering, not here.',
+    )
     exchange_rate: str | None = Field(
         None,
         description='Only when the currency is not SEK: SEK for one unit of the currency, as text: '
@@ -88,9 +117,17 @@ class Facts(BaseModel):
         '"Riksbanken 2026-10-19".',
         max_length=100,
     )
-    invoice_number: str | None = None
+    invoice_number: str | None = Field(
+        None,
+        description="The document's own number: the invoice number, or the order, receipt or "
+        'reference number when it has no invoice number.',
+    )
     due_date: str | None = Field(None, description='YYYY-MM-DD.')
-    payment_date: str | None = Field(None, description='When it was paid, YYYY-MM-DD, if known.')
+    payment_date: str | None = Field(
+        None,
+        description='When it was paid, YYYY-MM-DD, when the document or a statement says so. Leave '
+        'out otherwise: the invoice date is not a payment date.',
+    )
 
 
 class KonteringLine(BaseModel):
@@ -112,6 +149,13 @@ class Kontering(BaseModel):
         None, description='How VAT is handled, in words: "25 % Swedish VAT", "reverse charge, EU service".'
     )
     note: str | None = Field(None, description='Why these accounts, and what you were unsure about.')
+
+
+class Account(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    account: str = Field(description='Account number, 4 digits (up to 6).')
+    name: str = Field(description="Its name in the user's chart of accounts.", max_length=200)
 
 
 def _user(ctx: Context) -> str:
@@ -213,7 +257,12 @@ facts: only what the document says (date, counterparty, amount, currency, VAT). 
 there; never guess. For another currency than SEK, also give exchange_rate or amount_sek, with
 exchange_rate_source (see update_item). kontering: a proposal in SEK that balances, for the user to
 check; use accounts from list_accounts when there are any. source: where the document came from, such
-as the sender, date and subject of the mail.""",
+as the sender, date and subject of the mail.
+
+status: leave it out and the item is new. prepped, or skipped with skip_reason, can be set in the same
+call; update_item says what each needs. If the status cannot be set, the item is still added as new,
+and status_not_set in the answer says why.""",
+    annotations=_ADDS,
     structured_output=False,
 )
 async def add_item(
@@ -226,6 +275,11 @@ async def add_item(
     notes: Annotated[
         str | None, Field(description='Anything else the user should know.', max_length=4000)
     ] = None,
+    status: Annotated[
+        Literal['prepped', 'skipped'] | None,
+        Field(description='Leave out for new. prepped or skipped can be set as the item is added.'),
+    ] = None,
+    skip_reason: Annotated[str | None, Field(description='Why it is skipped.', max_length=300)] = None,
 ) -> list:
     user = _user(ctx)
     raw = file_base64.strip()
@@ -246,13 +300,29 @@ async def add_item(
         kontering=_given(kontering),
         notes=notes,
     )
+    # The status is a second step on the stored item, with the same conditions as in update_item.
+    # When it is refused, the item stays added as new: the file is in the list either way.
+    status_not_set = None
+    if status and created:
+        ref = item['id']
+        try:
+            item = await anyio.to_thread.run_sync(
+                lambda: store.update_item(user, ref, via='mcp', status=status, skip_reason=skip_reason)
+            )
+        except (store.StoreError, model.Invalid) as e:
+            status_not_set = f'Added as new, not {status}. {e}'
+    elif status:
+        status_not_set = 'The file was already in the list, so its status was not changed.'
     view = await _store(_view, user, item)
     note = (
         None
         if created
         else 'This file was already in the list. Nothing was changed; use update_item to change it.'
     )
-    return [_text({'created': created, 'note': note, 'item': view})]
+    reply = {'created': created, 'note': note, 'item': view}
+    if status_not_set:
+        reply['status_not_set'] = status_not_set
+    return [_text(reply)]
 
 
 @mcp.tool(
@@ -260,6 +330,7 @@ async def add_item(
 status: todo (new and prepped, the default), new, prepped, booked, skipped or all. text narrows to items
 whose counterparty, description, invoice number, file name, notes or voucher number contain it. Rows are
 short and show the first 12 characters of the id, which is enough for get_item and update_item.""",
+    annotations=_READS,
     structured_output=False,
 )
 async def list_items(
@@ -286,6 +357,7 @@ async def list_items(
     description="""One item in full: facts, proposed kontering with totals, status, booking details, what is
 missing before it can be prepped, warnings, and its history. id is the item's id or its first 8 or more
 characters. Read an item before changing it.""",
+    annotations=_READS,
     structured_output=False,
 )
 async def get_item(
@@ -311,8 +383,9 @@ agree to the öre. Say where it comes from in facts.exchange_rate_source ("recei
 
 status:
 - prepped: the facts date, amount and currency are in place, the total in SEK is known when the
-  currency is not SEK, and the kontering balances with at least two lines. It means "ready for the
-  user to book", not that it is correct: the user checks it.
+  currency is not SEK, and the kontering balances with at least two lines. Set it only when you
+  have no open question about the item; with a doubt, leave it new. It means "ready for the user
+  to book", not that it is correct: the user checks it.
 - booked: the user has booked it in their bookkeeping service. Send voucher (the voucher number there,
   e.g. "A 12") and receipt_attached=true (the receipt is attached to that voucher there). Only do this
   when the user tells you both. Never guess a voucher number.
@@ -321,6 +394,7 @@ status:
 - new: back to the start, for unfinished work.
 
 A prepped or booked item must stay complete: to save unfinished changes, set status to new as well.""",
+    annotations=_CHANGES,
     structured_output=False,
 )
 async def update_item(
@@ -354,6 +428,7 @@ async def update_item(
 page. Use these account numbers in a kontering. An empty list means the user has not supplied any:
 propose accounts as usual and say in kontering.note that they are unchecked against the user's chart.
 TallyQueue does not include the BAS chart of accounts.""",
+    annotations=_READS,
     structured_output=False,
 )
 async def list_accounts(ctx: Context) -> list:
@@ -362,16 +437,47 @@ async def list_accounts(ctx: Context) -> list:
 
 
 @mcp.tool(
+    description="""Add accounts to the user's own list of accounts.
+
+Only when the user asks you, in so many words, to add accounts to their list. Never as part of adding
+or changing receipts, and never to make a kontering pass a check: an account that is not in the list
+is a warning for the user, not something for you to fix.
+
+It works only while the user has switched it on in the web page, under Accounts, and it switches itself
+off again after an hour. While it is off this call is refused. Then tell the user so; do not ask them to
+switch it on unless adding accounts is what they asked for.
+
+It only adds. An account number that is already in the list keeps its name and comes back under
+already_there; changing or removing accounts is done in the web page. Use the numbers and names the user
+gives you or points you to, such as the chart in their bookkeeping service.""",
+    annotations=_ADDS,
+    structured_output=False,
+)
+async def add_accounts(
+    accounts: Annotated[
+        list[Account], Field(description='The accounts to add.', min_length=1, max_length=500)
+    ],
+    ctx: Context,
+) -> list:
+    user = _user(ctx)
+    added, already = await _store(store.add_accounts, user, [a.model_dump() for a in accounts])
+    count = len(await _store(store.read_accounts, user))
+    return [_text({'added': added, 'already_there': already, 'count': count})]
+
+
+@mcp.tool(
     description="""Riksbanken's published exchange rate for a currency on a date: SEK for one unit of it.
 
 Use it for a document in another currency than SEK, and only when neither the document nor a card or
-bank statement gives a rate or the total in SEK. date: the payment date when it is known, otherwise
-the date on the document. On a weekend or a holiday the answer is the latest rate before the date,
-and says which date it is from.
+bank statement gives a rate or the total in SEK. date: the payment date when the document or a
+statement gives it (for a card purchase, the day of the purchase), otherwise the date on the
+document. On a weekend or a holiday the answer is the latest rate before the date, and says which
+date it is from.
 
 Nothing is stored by this call. Give the answer to update_item: rate as facts.exchange_rate and source
 as facts.exchange_rate_source. Riksbanken publishes its rates for information only; the user checks
 the figure. Riksbanken allows only a few lookups a minute, so look up one rate per document.""",
+    annotations=_LOOKS_UP,
     structured_output=False,
 )
 async def get_riksbank_rate(
