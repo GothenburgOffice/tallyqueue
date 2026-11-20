@@ -60,8 +60,10 @@ checks every figure first.
   the payment date when it is known and otherwise the date on the document. Always say where the
   figure comes from in exchange_rate_source. Never estimate a rate.
 - Statuses: an added item is new. Mark it prepped only when the facts and a balanced kontering are
-  in place and you have no open question about it; with a doubt, leave it new and say what is
-  open. Booked means the user booked it in their bookkeeping service: mark it only when the user
+  in place and you have no open question about it; with one, leave it new and say what is open.
+  An open question is one only the user can answer, such as whether a purchase belongs to the
+  business or which of two VAT treatments applies. A rate from Riksbanken, or an account the
+  user has not listed, is not one: say it in the note. Booked means the user booked it in their bookkeeping service: mark it only when the user
   tells you the voucher number and that the receipt is attached there. Use skipped, with a
   reason, for what should not be booked.
 """
@@ -86,7 +88,11 @@ class Facts(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     kind: Literal['receipt', 'invoice', 'credit_note', 'other'] | None = None
-    date: str | None = Field(None, description='The date on the document, YYYY-MM-DD.')
+    date: str | None = Field(
+        None,
+        description='The date on the document, YYYY-MM-DD. For a mail with no date of its own, the '
+        'date the mail was sent.',
+    )
     counterparty: str | None = Field(None, description='The seller on a purchase, the customer on a sale.')
     description: str | None = Field(None, description='What it is for, in a few words.')
     amount: Amount = Field(
@@ -97,9 +103,9 @@ class Facts(BaseModel):
     currency: str | None = Field(None, description='Three-letter code: SEK, EUR, USD.')
     vat_amount: Amount = Field(
         None,
-        description='VAT as the document shows it, in the document currency. Leave out when the '
-        'document shows none. Under reverse charge the document shows 0 or nothing: the VAT you '
-        'work out belongs in the kontering, not here.',
+        description='VAT as the document shows it, in the document currency: "0.00" when it says '
+        'VAT 0, left out when it has no VAT line at all. Under reverse charge the VAT you work out '
+        'belongs in the kontering, not here.',
     )
     exchange_rate: str | None = Field(
         None,
@@ -119,14 +125,15 @@ class Facts(BaseModel):
     )
     invoice_number: str | None = Field(
         None,
-        description="The document's own number: the invoice number, or the order, receipt or "
-        'reference number when it has no invoice number.',
+        description='The invoice number when the document carries one, also on a receipt that '
+        'names its invoice. Otherwise its order, receipt or reference number.',
     )
     due_date: str | None = Field(None, description='YYYY-MM-DD.')
     payment_date: str | None = Field(
         None,
-        description='When it was paid, YYYY-MM-DD, when the document or a statement says so. Leave '
-        'out otherwise: the invoice date is not a payment date.',
+        description='When it was paid, YYYY-MM-DD, when the document or a statement says so. A '
+        'receipt for a card purchase is paid on its date. Leave out otherwise: the date of an '
+        'invoice is not a payment date.',
     )
 
 
@@ -209,7 +216,10 @@ def _view(user: str, item: dict, *, history: bool = False) -> dict:
         'status': item['status'],
         'facts': {k: v for k, v in item['facts'].items() if v is not None},
         'kontering': item['kontering'],
-        'kontering_totals': {'debit': f'{debit:.2f}', 'credit': f'{credit:.2f}', 'balanced': debit == credit},
+        # Nothing to balance when there is no kontering: 0.00 against 0.00 would read as "balanced".
+        'kontering_totals': {'debit': f'{debit:.2f}', 'credit': f'{credit:.2f}', 'balanced': debit == credit}
+        if item['kontering']
+        else None,
         'booking': item['booking'],
         'skip_reason': item['skip_reason'],
         'notes': item['notes'],

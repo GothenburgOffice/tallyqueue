@@ -454,13 +454,26 @@ def test_the_instructions_tell_a_client_what_the_blind_runs_missed():
         'Treat alike documents alike',
         'only when the user asks you to add accounts, never while adding receipts',
         'you have no open question about it',
+        'An open question is one only the user can answer',
         'for the payment date when it is known and otherwise the date on the document',
     ):
         assert rule in said, rule
     fields = server.Facts.model_json_schema()['properties']
     assert 'order, receipt or reference number' in fields['invoice_number']['description']
+    assert 'also on a receipt that names its invoice' in fields['invoice_number']['description']
     assert 'belongs in the kontering' in fields['vat_amount']['description']
+    assert '"0.00" when it says VAT 0' in fields['vat_amount']['description']
     assert 'not a payment date' in fields['payment_date']['description']
+    assert 'A receipt for a card purchase is paid on its date' in fields['payment_date']['description']
+    assert 'the date the mail was sent' in fields['date']['description']
+
+
+def test_an_item_without_a_kontering_is_not_called_balanced():
+    item = ok(
+        'add_item', {'file_base64': b64(b'A mail with nothing to book (made up)'), 'filename': 'm.txt'}
+    )['item']
+    assert item['kontering'] is None and item['kontering_totals'] is None
+    ok('update_item', {'id': item['id'], 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
 
 
 def test_facts_can_be_cleared_and_unknown_fields_are_refused(hosting):
