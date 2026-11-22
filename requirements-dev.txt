@@ -1,5 +1,5 @@
 # Tools for tests and checks. Not installed in the production image.
 -r requirements.txt
 pytest==9.2.0
-ruff==0.17.5
+ruff==0.17.6
 pip-audit==2.10.1
