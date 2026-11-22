@@ -68,15 +68,27 @@ def token_problem(token: str) -> str | None:
     return None
 
 
+def is_placeholder(token: str) -> bool:
+    """A ${NAME} left as it was: the client was meant to put the token in its place."""
+    return token.startswith('${')
+
+
 def why_refused(token: str) -> str:
     """Why a token was refused, for the one who sent it. It never repeats the token.
 
-    Two different mistakes get two different answers: text that is not a token at all, and a
-    token that no entry in TALLYQUEUE_USERS was made from. The shape of a token is no secret
-    (it is in this file), and neither answer says anything about the tokens that do work.
+    Each mistake gets its own answer: nothing sent, a ${...} placeholder that was not filled in,
+    text that is not a token at all, and a token that no entry in TALLYQUEUE_USERS was made
+    from. The answer is the same wherever the token came in, a header or the sign-in form. The
+    shape of a token is no secret (it is in this file), and no answer says anything about the
+    tokens that do work.
     """
     if not token:
         return 'No token was sent.'
+    if is_placeholder(token):
+        return (
+            'No token was sent, only a ${...} placeholder that was not filled in. '
+            'The token goes in its place.'
+        )
     problem = token_problem(token)
     if problem:
         return (
@@ -103,15 +115,18 @@ def user_for_token(token: str) -> str | None:
 
 
 def token_from_headers(headers) -> str:
-    """The token a request carries: X-API-Key, or Authorization: Bearer."""
+    """What a request carries as its token: X-API-Key, or Authorization: Bearer.
+
+    A ${PLACEHOLDER} that the client did not fill in comes back as it is. It is never a token
+    (token_problem refuses it), and why_refused names it.
+    """
     value = (headers.get('x-api-key') or '').strip()
     if not value:
         auth = (headers.get('authorization') or '').strip()
         value = auth[7:].strip() if auth.lower().startswith('bearer ') else ''
     if value.lower().startswith('bearer '):
         value = value[7:].strip()
-    # A client that did not fill in its ${PLACEHOLDER} sent no token.
-    return '' if value.startswith('${') else value
+    return value
 
 
 def user_for_headers(headers) -> str | None:
