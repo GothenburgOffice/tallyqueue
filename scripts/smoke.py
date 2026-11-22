@@ -130,7 +130,15 @@ async def main():
         tools = sorted(t.name for t in (await session.list_tools()).tools)
         check(
             tools
-            == ['add_item', 'get_item', 'get_riksbank_rate', 'list_accounts', 'list_items', 'update_item'],
+            == [
+                'add_accounts',
+                'add_item',
+                'get_item',
+                'get_riksbank_rate',
+                'list_accounts',
+                'list_items',
+                'update_item',
+            ],
             f'tools: {", ".join(tools)}',
         )
 

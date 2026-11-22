@@ -10,7 +10,7 @@
   {% if item.facts.amount %} · <strong>{{ item.facts.amount|money }} {{ item.facts.currency or '' }}</strong>{% endif %}
   {% if item.facts.amount_sek %} = {{ item.facts.amount_sek|money }} SEK{% endif %}
   {% if item.facts.vat_amount %} · VAT {{ item.facts.vat_amount|money }}{% endif %}
-  {% if item.facts.invoice_number %} · invoice {{ item.facts.invoice_number }}{% endif %}
+  {% if item.facts.invoice_number %} · no. {{ item.facts.invoice_number }}{% endif %}
   {% if item.facts.description %} · {{ item.facts.description }}{% endif %}
 </p>
 <p class="sub">Item {{ item.id[:12] }} · added {{ item.created[:10] }}{% if item.source %} · from: {{ item.source }}{% endif %}</p>
