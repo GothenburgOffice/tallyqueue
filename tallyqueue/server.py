@@ -537,7 +537,10 @@ async def upload(request: Request) -> Response:
     """
     user = auth.user_for_headers(request.headers)
     if not user:
-        return JSONResponse({'error': 'unauthorized: send your token as X-API-Key'}, status_code=401)
+        why = auth.why_refused(auth.token_from_headers(request.headers))
+        return JSONResponse(
+            {'error': f'unauthorized: {why} Send your TallyQueue token as X-API-Key.'}, status_code=401
+        )
     try:
         data = await read_body(request, store.MAX_RECEIPT_BYTES)
     except TooLarge:
@@ -617,7 +620,8 @@ def build_app():
         # The MCP endpoint is for approved users only. The tools check the token again.
         on_mcp = scope['path'] == '/mcp' or scope['path'].startswith('/mcp/')
         if on_mcp and not auth.user_for_headers(headers):
-            return await refuse(401, 'unauthorized: send your TallyQueue token as X-API-Key')
+            why = auth.why_refused(auth.token_from_headers(headers))
+            return await refuse(401, f'unauthorized: {why} Send your TallyQueue token as X-API-Key.')
         await app(scope, receive, send_with_headers)
 
     return guarded

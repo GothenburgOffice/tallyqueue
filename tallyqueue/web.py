@@ -176,10 +176,11 @@ async def login(request: Request) -> Response:
         return _message(None, 403, 'Refused', 'This form was not sent from TallyQueue itself.')
     form = await request.form(max_files=0, max_fields=10, max_part_size=4096)
     target = _safe_next(str(form.get('next', '')))
-    user = auth.user_for_token(str(form.get('token', '')).strip())
+    token = str(form.get('token', '')).strip()
+    user = auth.user_for_token(token)
     if not user:
         return _page(
-            'login.html', None, 401, next=target, open=bool(auth.USERS), error='That token is not approved.'
+            'login.html', None, 401, next=target, open=bool(auth.USERS), error=auth.why_refused(token)
         )
     response = _redirect(target)
     response.set_cookie(
