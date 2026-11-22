@@ -211,14 +211,16 @@ def _row(item: dict) -> dict:
 
 def _view(user: str, item: dict, *, history: bool = False) -> dict:
     debit, credit = model.totals(item['kontering'])
+    has_lines = bool((item['kontering'] or {}).get('lines'))
     out = {
         'id': item['id'],
         'status': item['status'],
         'facts': {k: v for k, v in item['facts'].items() if v is not None},
         'kontering': item['kontering'],
-        # Nothing to balance when there is no kontering: 0.00 against 0.00 would read as "balanced".
+        # Nothing to balance without lines, whether there is no kontering or one with only a note
+        # or a VAT treatment: 0.00 against 0.00 would read as "balanced".
         'kontering_totals': {'debit': f'{debit:.2f}', 'credit': f'{credit:.2f}', 'balanced': debit == credit}
-        if item['kontering']
+        if has_lines
         else None,
         'booking': item['booking'],
         'skip_reason': item['skip_reason'],

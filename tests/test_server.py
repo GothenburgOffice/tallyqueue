@@ -468,11 +468,24 @@ def test_the_instructions_tell_a_client_what_the_blind_runs_missed():
     assert 'the date the mail was sent' in fields['date']['description']
 
 
-def test_an_item_without_a_kontering_is_not_called_balanced():
+def test_a_kontering_without_lines_is_not_called_balanced():
     item = ok(
         'add_item', {'file_base64': b64(b'A mail with nothing to book (made up)'), 'filename': 'm.txt'}
     )['item']
     assert item['kontering'] is None and item['kontering_totals'] is None
+
+    # a note or a VAT treatment without lines is a kontering, but there is still nothing to balance
+    for words in ({'note': 'Unsure which account fits'}, {'vat_treatment': 'reverse charge, EU service'}):
+        item = ok('update_item', {'id': item['id'], 'kontering': words})
+        assert item['kontering']['lines'] == [] and item['kontering'] | words == item['kontering']
+        assert item['kontering_totals'] is None
+        assert 'The kontering needs at least two lines' in item['missing_for_prepped']
+
+    # one line is something to balance, and it does not
+    item = ok(
+        'update_item', {'id': item['id'], 'kontering': {'lines': [{'account': '6540', 'debit': '99.00'}]}}
+    )
+    assert item['kontering_totals'] == {'debit': '99.00', 'credit': '0.00', 'balanced': False}
     ok('update_item', {'id': item['id'], 'status': 'skipped', 'skip_reason': 'Test probe, not a receipt'})
 
 
