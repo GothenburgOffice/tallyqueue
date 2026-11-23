@@ -14,6 +14,11 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 STATUSES = ('new', 'prepped', 'booked', 'skipped')
 KINDS = ('receipt', 'invoice', 'credit_note', 'other')
+# What one of an item's files is. document: the receipt, invoice or credit note itself. payment:
+# a record of the payment from the bank or card issuer, such as what was drawn in SEK for a
+# purchase in another currency. other: anything else that documents the item.
+FILE_KINDS = ('document', 'payment', 'other')
+MAX_FILES = 10
 FACT_FIELDS = (
     'kind',
     'date',
@@ -292,6 +297,8 @@ def totals(kontering: dict | None) -> tuple[Decimal, Decimal]:
 def prep_problems(item: dict) -> list[str]:
     """What is missing before the item can be called prepped. Empty when nothing is."""
     problems = []
+    if not item.get('files'):
+        problems.append('No file documents the item yet: add the receipt or invoice')
     facts = item.get('facts') or {}
     missing = [name for name in ('date', 'amount', 'currency') if not facts.get(name)]
     if missing:
@@ -317,8 +324,8 @@ def booking_problems(item: dict) -> list[str]:
     problems = []
     if not booking.get('voucher'):
         problems.append('The voucher number from the bookkeeping service is missing')
-    if not booking.get('receipt_attached'):
-        problems.append('Confirm that the receipt is attached to the voucher in the bookkeeping service')
+    # Where the files are archived is the user's own: in the bookkeeping service, or a folder of
+    # their own when the service keeps no documents. The tick says it was done; it is no condition.
     return problems
 
 
@@ -349,6 +356,13 @@ def warnings(item: dict, accounts: list[dict], others: list[dict]) -> list[str]:
                 out.append(f'Not in your list of accounts: {", ".join(unknown)}')
     # A skipped item is settled: it is no twin to warn about, and needs no such warning itself.
     if item.get('status') != 'skipped':
+        currency = (item.get('facts') or {}).get('currency')
+        files = item.get('files') or []
+        if currency not in (None, 'SEK') and not any(f.get('kind') == 'payment' for f in files):
+            out.append(
+                f'The amount is in {currency}, and no payment record is attached: the bank or card '
+                "statement's record of what was drawn in SEK completes the documentation"
+            )
         twins = [o['id'][:12] for o in others if o.get('status') != 'skipped' and _same_purchase(item, o)]
         if twins:
             out.append(f'Same date, amount and currency as: {", ".join(twins)}. Possibly the same purchase')

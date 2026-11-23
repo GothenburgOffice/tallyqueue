@@ -65,6 +65,9 @@ SOFTWARE = made_up_pdf(
         'Subscription, one month: 20.00 EUR',
     ]
 )
+STATEMENT = (
+    b'MADE-UP TEST CARD STATEMENT LINE - not a real document\nExample Software Ltd, EUR 20.00, SEK 228.47\n'
+)
 LUNCH = b'MADE-UP TEST MAIL - not a real document\n\nTack for ditt kop!\nLunch 129,00 kr\n'
 
 
@@ -132,6 +135,7 @@ async def main():
             tools
             == [
                 'add_accounts',
+                'add_file',
                 'add_item',
                 'get_item',
                 'get_riksbank_rate',
@@ -158,6 +162,11 @@ async def main():
             check(
                 status == 200 and json.loads(body)['created'] is False,
                 'its receipt file is still known by checksum',
+            )
+            item = await call('get_item', id=software_id)
+            check(
+                [f['kind'] for f in item['files']] == ['document', 'payment'],
+                'both files of the uploaded item survived',
             )
             return
 
@@ -201,6 +210,18 @@ async def main():
             'POST /upload takes the raw file with an upload ticket',
         )
         check(request(f'{base}/upload', SOFTWARE, upload)[0] == 401, 'the ticket is used up after one upload')
+        # The card statement's line for it: what was drawn in SEK, a second file of the same item.
+        paid = await call(
+            'add_file',
+            id=software_id,
+            file_base64=base64.b64encode(STATEMENT).decode(),
+            filename='card-statement.txt',
+            kind='payment',
+        )
+        check(
+            [f['kind'] for f in paid['item']['files']] == ['document', 'payment'],
+            'a payment record is a second file of the same item',
+        )
         item = await call(
             'update_item',
             id=software_id,
@@ -244,12 +265,17 @@ async def main():
     check(
         'script' not in headers.get('Content-Security-Policy', 'script'), 'the page policy allows no scripts'
     )
-    status, headers, body = request(f'{base}/receipts/{hosting_id}', headers={'Cookie': cookie})
+    status, headers, body = request(
+        f'{base}/items/{hosting_id}/files/{hosting_id}', headers={'Cookie': cookie}
+    )
     check(
         status == 200 and body == HOSTING and headers['Content-Type'] == 'application/pdf',
         'the receipt comes back unchanged',
     )
-    check(request(f'{base}/receipts/{hosting_id}')[0] == 303, 'a receipt is not served without a sign-in')
+    check(
+        request(f'{base}/items/{hosting_id}/files/{hosting_id}')[0] == 303,
+        'a receipt is not served without a sign-in',
+    )
     print('All checks passed.')
 
 

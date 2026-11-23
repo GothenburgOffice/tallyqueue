@@ -187,10 +187,14 @@ class Browser:
     def sign_in(self, token):
         return self.post('/login', {'token': token}, csrf=False)
 
-    def upload(self, filename, data):
+    def upload(self, filename, data, path='/items', fields=None):
         boundary = 'made-up-boundary-7d1'
+        fields = {'csrf': self.csrf()} | (fields or {})
         parts = [
-            f'--{boundary}\r\nContent-Disposition: form-data; name="csrf"\r\n\r\n{self.csrf()}\r\n'.encode(),
+            *(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+                for name, value in fields.items()
+            ),
             f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
             'Content-Type: application/octet-stream\r\n\r\n'.encode()
             + data
@@ -202,7 +206,7 @@ class Browser:
             'Cookie': self.cookie,
             'Origin': BASE,
         }
-        return fetch('POST', '/items', b''.join(parts), headers)
+        return fetch('POST', path, b''.join(parts), headers)
 
 
 @pytest.fixture(scope='module')
@@ -407,14 +411,16 @@ def test_the_status_flow_new_prepped_booked():
     assert ok('get_item', {'id': ref})['kontering_totals']['balanced'] is True
 
     assert 'voucher number' in refused('update_item', {'id': ref, 'status': 'booked'})
-    assert 'receipt is attached' in refused('update_item', {'id': ref, 'status': 'booked', 'voucher': 'A 7'})
-    item = ok('update_item', {'id': ref, 'status': 'booked', 'voucher': 'A 7', 'receipt_attached': True})
+    item = ok('update_item', {'id': ref, 'status': 'booked', 'voucher': 'A 7'})
     assert item['status'] == 'booked'
+    assert item['booking'] == {'voucher': 'A 7', 'receipt_attached': False, 'date': store.today()}
+    item = ok('update_item', {'id': ref, 'receipt_attached': True})
     assert item['booking'] == {'voucher': 'A 7', 'receipt_attached': True, 'date': store.today()}
     assert 'voucher number' in refused('update_item', {'id': ref, 'voucher': ''})  # booked keeps its voucher
 
     history = [event['what'] for event in ok('get_item', {'id': ref})['history']]
-    assert history[0] == 'added' and history[-1].endswith('status: prepped to booked')
+    assert history[0] == 'added' and history[-2].endswith('status: prepped to booked')
+    assert history[-1] == 'booking'  # the tick, given later on its own
     assert ok('list_items', {'status': 'booked'})['items'][0]['voucher'] == 'A 7'
 
 
@@ -423,7 +429,7 @@ def test_skipped_needs_a_reason_and_can_be_reopened():
         'add_item',
         {'file_base64': b64(b'Tack for ditt kop! Privat lunch 129 kr (made up)'), 'filename': 'mail.txt'},
     )['item']
-    assert item['receipt']['media_type'] == 'text/plain'
+    assert item['files'][0]['media_type'] == 'text/plain'
     assert 'Say why' in refused('update_item', {'id': item['id'], 'status': 'skipped'})
     item = ok('update_item', {'id': item['id'], 'status': 'skipped', 'skip_reason': 'Private purchase'})
     assert item['status'] == 'skipped' and item['skip_reason'] == 'Private purchase'
@@ -487,7 +493,10 @@ def test_the_instructions_tell_a_client_what_the_blind_runs_missed():
     # Two models were given real documents and these instructions. What they tripped on is now said.
     said = ' '.join(server.INSTRUCTIONS.split())
     for rule in (
-        'Two documents for one purchase',
+        'An item is one purchase or sale, with the files that document it',
+        'keep the one that is the better record of what happened',
+        'what was drawn in SEK belongs with the receipt: add it as kind payment',
+        'Never write out a PDF or an image as base64',
         'no payment date unless the document or a statement gives one',
         'no VAT amount when the document shows none',
         'What you conclude yourself is not a fact',
@@ -545,7 +554,14 @@ def test_upload_takes_raw_bytes_and_is_idempotent():
     status, _, body = fetch('POST', '/upload', data, headers)
     reply = json.loads(body)
     assert status == 201 and reply['created'] is True and reply['id'] == sha(data)
-    assert reply['receipt'] == {'filename': 'kvitto foto.png', 'media_type': 'image/png', 'bytes': len(data)}
+    file = reply['file']
+    assert (file['filename'], file['media_type'], file['bytes'], file['kind']) == (
+        'kvitto foto.png',
+        'image/png',
+        len(data),
+        'document',
+    )
+    assert file['sha256'] == sha(data) and reply['files'] == 1
     status, _, body = fetch('POST', '/upload', data, headers)
     assert status == 200 and json.loads(body)['created'] is False
     assert ok('get_item', {'id': sha(data)})['history'][0]['via'] == 'upload'
@@ -642,7 +658,12 @@ def test_upload_tickets_expire_and_are_limited_per_user(monkeypatch):
 
 # ---------------------------------------------------------------- web page
 def test_pages_need_a_sign_in():
-    for path in ('/items', f'/items/{sha(HOSTING)}', f'/receipts/{sha(HOSTING)}', '/accounts'):
+    for path in (
+        '/items',
+        f'/items/{sha(HOSTING)}',
+        f'/items/{sha(HOSTING)}/files/{sha(HOSTING)}',
+        '/accounts',
+    ):
         status, headers, _ = fetch('GET', path)
         assert status == 303 and headers['location'].startswith('/login?next=%2F'), path
     assert fetch('GET', '/')[1]['location'] == '/login'
@@ -695,7 +716,7 @@ def test_the_list_and_the_item_page_show_the_item(alice, hosting):
     assert status == 303 and headers['location'] == f'/items/{hosting["id"]}'
     status, _, body = alice.get(f'/items/{hosting["id"]}')
     assert status == 200 and b'value="1250.00"' in body and b'value="6230"' in body and b'Balances' in body
-    assert f'<iframe src="/receipts/{hosting["id"]}"'.encode() in body
+    assert f'<iframe src="/items/{hosting["id"]}/files/{hosting["id"]}"'.encode() in body
     assert alice.get('/items/' + 'f' * 64)[0] == 404
 
 
@@ -769,12 +790,12 @@ def test_editing_through_the_web_page(alice):
     assert alice.post(f'{path}/status', {'to': 'prepped'})[0] == 303
     status, _, body = alice.post(f'{path}/kontering', lines | {'credit_2': '400'})
     assert status == 422 and b'does not balance' in body and b'value="400"' in body
-    status, _, body = alice.post(f'{path}/status', {'to': 'booked', 'voucher': 'A 31'})
-    assert status == 422 and b'receipt is attached' in body
-    assert (
-        alice.post(f'{path}/status', {'to': 'booked', 'voucher': 'A 31', 'receipt_attached': 'on'})[0] == 303
-    )
-    assert ok('get_item', {'id': sha(data)})['booking']['voucher'] == 'A 31'
+    # the tick is no condition: the files may be archived in a folder of the user's own
+    page = alice.get(path)[2].decode()
+    assert 'name="receipt_attached">' in page and 'name="receipt_attached" required' not in page
+    assert alice.post(f'{path}/status', {'to': 'booked', 'voucher': 'A 31'})[0] == 303
+    booking = ok('get_item', {'id': sha(data)})['booking']
+    assert booking['voucher'] == 'A 31' and booking['receipt_attached'] is False
     assert b'voucher <strong>A 31</strong>' in alice.get(path)[2]
 
     assert alice.post(f'{path}/delete', {})[0] == 422
@@ -785,15 +806,17 @@ def test_editing_through_the_web_page(alice):
 
 
 def test_receipts_are_served_to_their_owner_only(alice, hosting):
-    status, headers, body = alice.get(f'/receipts/{hosting["id"]}')
+    status, headers, body = alice.get(f'/items/{hosting["id"]}/files/{hosting["id"]}')
     assert status == 200 and body == HOSTING and headers['content-type'] == 'application/pdf'
     assert headers['x-content-type-options'] == 'nosniff' and headers['x-frame-options'] == 'SAMEORIGIN'
     assert "frame-ancestors 'self'" in headers['content-security-policy']
     assert headers['content-disposition'].startswith('inline')
-    assert alice.get(f'/receipts/{hosting["id"]}?download')[1]['content-disposition'].startswith('attachment')
+    assert alice.get(f'/items/{hosting["id"]}/files/{hosting["id"]}?download')[1][
+        'content-disposition'
+    ].startswith('attachment')
     bob = Browser()
     bob.sign_in(BOB)
-    assert bob.get(f'/receipts/{hosting["id"]}')[0] == 404
+    assert bob.get(f'/items/{hosting["id"]}/files/{hosting["id"]}')[0] == 404
     assert bob.get(f'/items/{hosting["id"]}')[0] == 404
 
 
@@ -815,7 +838,7 @@ def test_a_web_upload_may_be_as_large_as_the_receipt_limit(alice):
     assert 64 * 1024 < len(big) < store.MAX_RECEIPT_BYTES
     status, headers, _ = alice.upload('large.pdf', big)
     assert status == 303 and headers['location'] == f'/items/{sha(big)}?msg=added'
-    assert alice.get(f'/receipts/{sha(big)}')[2] == big
+    assert alice.get(f'/items/{sha(big)}/files/{sha(big)}')[2] == big
     too_big = pdf('never stored ' + 'x' * (store.MAX_RECEIPT_BYTES + 70 * 1024))
     assert alice.upload('too-large.pdf', too_big)[0] == 413
     assert alice.get(f'/items/{sha(too_big)}')[0] == 404
@@ -827,9 +850,9 @@ def test_an_svg_is_stored_as_text_and_never_served_as_an_image(alice):
     for name in ('drawing.svg', 'renamed.txt'):
         assert alice.upload(name, svg)[0] == 303
     item = ok('get_item', {'id': sha(svg)})
-    assert item['receipt']['media_type'] == 'text/plain'
+    assert item['files'][0]['media_type'] == 'text/plain'
     assert os.path.exists(os.path.join(store.DATA_DIR, 'users', 'alice', 'receipts', f'{sha(svg)}.txt'))
-    status, headers, body = alice.get(f'/receipts/{sha(svg)}')
+    status, headers, body = alice.get(f'/items/{sha(svg)}/files/{sha(svg)}')
     assert status == 200 and body == svg
     assert headers['content-type'] == 'text/plain; charset=utf-8'
     assert 'sandbox' in headers['content-security-policy'] and headers['x-content-type-options'] == 'nosniff'
@@ -840,7 +863,7 @@ def test_an_svg_is_stored_as_text_and_never_served_as_an_image(alice):
 def test_an_html_receipt_is_shown_as_text_never_as_a_page(alice):
     page = b'<html><body><script>alert(1)</script>Kvitto 59 kr (made up)</body></html>'
     assert alice.upload('mail.html', page)[0] == 303
-    status, headers, body = alice.get(f'/receipts/{sha(page)}')
+    status, headers, body = alice.get(f'/items/{sha(page)}/files/{sha(page)}')
     assert status == 200 and body == page
     assert (
         headers['content-type'].startswith('text/plain') and 'sandbox' in headers['content-security-policy']
@@ -945,6 +968,169 @@ def test_an_accounts_codes_reach_the_ai_client_and_survive_the_web_page(alice, h
     assert ok('list_accounts')['accounts'] == before
 
 
+async def _tools() -> dict:
+    """The tools as a client lists them, by name: what a client sees before it calls any."""
+    async with (
+        create_mcp_http_client(headers={'X-API-Key': ALICE}) as client,
+        streamable_http_client(f'{BASE}/mcp', http_client=client) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        return {tool.name: tool for tool in (await session.list_tools()).tools}
+
+
+# ---------------------------------------------------------------- several files per item
+USD = {'date': '2026-10-19', 'counterparty': 'Example Tools Inc', 'amount': '20.00', 'currency': 'USD'}
+
+
+def test_an_item_gathers_the_files_that_document_one_purchase():
+    # The item comes first, with its facts; its files follow, each with what it is.
+    item = ok('add_item', {'facts': USD, 'source': 'Made-up mail, 2026-10-19'})['item']
+    assert item['files'] == [] and len(item['id']) == 64
+    assert any('No file documents the item yet' in p for p in item['missing_for_prepped'])
+
+    receipt = pdf('Example Tools Inc, receipt 5501, 20.00 USD (made up)')
+    ticket = ok('upload_ticket', {'item_id': item['id'][:12], 'sha256': sha(receipt)})
+    assert ticket['to_item'] == item['id']
+    upload = {'X-Upload-Ticket': ticket['ticket'], 'X-Filename': 'r.pdf'}
+    status, _, body = fetch('POST', '/upload', receipt, upload)
+    reply = json.loads(body)
+    assert status == 201 and reply['id'] == item['id'] and reply['files'] == 1
+    assert reply['file']['kind'] == 'document'
+    # in another currency, the item asks for the bank's record of what was drawn in SEK
+    assert any('no payment record is attached' in w for w in ok('get_item', {'id': item['id']})['warnings'])
+
+    # the bank's notice, a small text, goes with add_file as kind payment
+    notice = b'Made-up bank notice: card purchase Example Tools Inc, USD 20.00, drawn SEK 211.40\n'
+    args = {'id': item['id'], 'file_base64': b64(notice), 'filename': 'bank.txt', 'kind': 'payment'}
+    reply = ok('add_file', args)
+    assert reply['added'] is True
+    files = reply['item']['files']
+    assert [(f['filename'], f['kind']) for f in files] == [('r.pdf', 'document'), ('bank.txt', 'payment')]
+    assert not any('payment record' in w for w in reply['item']['warnings'])
+    # the same file again changes nothing
+    again = ok('add_file', args)
+    assert again['added'] is False and len(again['item']['files']) == 2
+
+    # a file belongs to one item: as a new item it returns the one that has it ...
+    assert ok('add_item', {'file_base64': b64(notice)})['item']['id'] == item['id']
+    # ... and it is refused for another item
+    other = ok('add_item', {'facts': {'counterparty': 'Another made-up shop'}})['item']
+    assert 'already in another item' in refused('add_file', {'id': other['id'], 'file_base64': b64(notice)})
+    status, _, body = fetch('POST', '/upload', receipt, {'X-API-Key': ALICE, 'X-Item-Id': other['id']})
+    assert status == 400 and b'already in another item' in body
+    # with the token, a script names the item and the kind itself
+    statement = pdf('Made-up card statement, line: Example Tools Inc SEK 211.40')
+    headers = {
+        'X-API-Key': ALICE,
+        'X-Item-Id': other['id'][:12],
+        'X-File-Kind': 'payment',
+        'X-Filename': 's.pdf',
+    }
+    status, _, body = fetch('POST', '/upload', statement, headers)
+    assert status == 201 and json.loads(body)['file']['kind'] == 'payment'
+    missing = {'X-API-Key': ALICE, 'X-Item-Id': 'f' * 12}
+    assert fetch('POST', '/upload', pdf('made-up, no such item'), missing)[0] == 404
+    status, _, body = fetch('POST', '/upload', pdf('made-up kind'), headers | {'X-File-Kind': 'bill'})
+    assert status == 400 and b'kind: one of document, payment, other' in body
+    # a client can add files but not remove them: that is the user's, in the web page
+    assert not [name for name in asyncio.run(_tools()) if 'remove' in name or 'delete' in name]
+
+
+def test_the_item_page_shows_adds_and_removes_files(alice):
+    item = ok('add_item', {'facts': USD | {'counterparty': 'Example Page Co'}})['item']
+    path = f'/items/{item["id"]}'
+    page = alice.get(path)[2].decode()
+    assert 'No file documents this item yet' in page and 'Add file' in page
+
+    receipt, notice = pdf('Example Page Co, receipt (made up)'), b'Made-up bank notice, SEK 215.00\n'
+    status, headers, _ = alice.upload('receipt.pdf', receipt, f'{path}/files')
+    assert status == 303 and headers['location'] == f'{path}?msg=file_added'
+    status, headers, _ = alice.upload('bank.txt', notice, f'{path}/files', {'kind': 'payment'})
+    assert headers['location'] == f'{path}?msg=file_added'
+    assert alice.upload('bank.txt', notice, f'{path}/files')[1]['location'] == f'{path}?msg=file_known'
+    page = alice.get(path)[2].decode()
+    assert f'<iframe src="{path}/files/{sha(receipt)}"' in page
+    assert 'bank.txt' in page and '· payment ·' in page and '2 files' in alice.get('/items')[2].decode()
+    # each file is served under its own item, to its owner only
+    assert alice.get(f'{path}/files/{sha(notice)}')[2] == notice
+    page = alice.get(f'{path}?file={sha(notice)}')[2].decode()
+    assert f'<iframe src="{path}/files/{sha(notice)}"' in page
+    assert Browser().get(f'{path}/files/{sha(notice)}')[0] == 303
+    bob = Browser()
+    bob.sign_in(BOB)
+    assert bob.get(f'{path}/files/{sha(notice)}')[0] == 404
+    assert alice.get(f'/items/{sha(HOSTING)}/files/{sha(notice)}')[0] == 404  # not that item's file
+
+    # removing takes a tick, deletes the file, and keeps a prepped item documented
+    status, _, body = alice.post(f'{path}/remove-file', {'sha256': sha(notice)})
+    assert status == 422 and b'Tick the box' in body
+    status, headers, _ = alice.post(f'{path}/remove-file', {'sha256': sha(notice), 'confirm': 'on'})
+    assert headers['location'] == f'{path}?msg=file_removed'
+    assert alice.get(f'{path}/files/{sha(notice)}')[0] == 404
+    folder = os.path.join(store.DATA_DIR, 'users', 'alice', 'receipts')
+    assert f'{sha(notice)}.txt' not in os.listdir(folder)
+    balanced = {'lines': [{'account': '6540', 'debit': '215.00'}, {'account': '1930', 'credit': '215.00'}]}
+    changes = {
+        'id': item['id'],
+        'facts': {'amount_sek': '215.00'},
+        'kontering': balanced,
+        'status': 'prepped',
+    }
+    ok('update_item', changes)
+    status, _, body = alice.post(f'{path}/remove-file', {'sha256': sha(receipt), 'confirm': 'on'})
+    assert status == 422 and b'No file documents the item yet' in body
+    assert len(ok('get_item', {'id': item['id']})['files']) == 1
+
+    # deleting the item deletes every file it has
+    ok('update_item', {'id': item['id'], 'status': 'new'})
+    alice.upload('bank.txt', notice, f'{path}/files', {'kind': 'payment'})
+    assert alice.post(f'{path}/delete', {'confirm': 'on'})[0] == 303
+    assert not {f'{sha(receipt)}.pdf', f'{sha(notice)}.txt'} & set(os.listdir(folder))
+
+
+def test_an_item_saved_before_several_files_reads_with_its_one_file(alice):
+    # As an earlier version wrote it: the file under "receipt", stored by the item's id.
+    data = pdf('Made-up receipt kept by an earlier version')
+    old_id = sha(data)
+    folder = os.path.join(store.DATA_DIR, 'users', 'alice')
+    with open(os.path.join(folder, 'receipts', f'{old_id}.pdf'), 'wb') as f:
+        f.write(data)
+    old = {
+        'id': old_id,
+        'status': 'new',
+        'created': '2026-10-01T10:00:00Z',
+        'updated': '2026-10-01T10:00:00Z',
+        'receipt': {'filename': 'old.pdf', 'ext': 'pdf', 'media_type': 'application/pdf', 'bytes': len(data)},
+        'source': None,
+        'facts': {'counterparty': 'Made-up old shop'},
+        'kontering': None,
+        'booking': None,
+        'skip_reason': None,
+        'notes': None,
+        'history': [{'at': '2026-10-01T10:00:00Z', 'by': 'alice', 'via': 'upload', 'what': 'added'}],
+    }
+    with open(os.path.join(folder, 'items', f'{old_id}.json'), 'w', encoding='utf-8') as f:
+        json.dump(old, f)
+    assert ok('get_item', {'id': old_id})['files'] == [
+        {
+            'sha256': old_id,
+            'filename': 'old.pdf',
+            'kind': 'document',
+            'media_type': 'application/pdf',
+            'bytes': len(data),
+            'added': '2026-10-01T10:00:00Z',
+        }
+    ]
+    assert alice.get(f'/items/{old_id}/files/{old_id}')[2] == data
+    # the same file again finds it; a change writes the item in the new form
+    assert ok('add_item', {'file_base64': b64(data)})['created'] is False
+    ok('update_item', {'id': old_id, 'notes': 'Made-up note'})
+    with open(os.path.join(folder, 'items', f'{old_id}.json'), encoding='utf-8') as f:
+        saved = json.load(f)
+    assert 'receipt' not in saved and saved['files'][0]['sha256'] == old_id
+
+
 def test_each_tool_says_whether_it_writes_so_a_client_can_ask_first():
     async def tools():
         async with (
@@ -958,6 +1144,7 @@ def test_each_tool_says_whether_it_writes_so_a_client_can_ask_first():
     found = {tool.name: tool.annotations for tool in asyncio.run(tools())}
     assert {name: a.read_only_hint for name, a in found.items()} == {
         'add_accounts': False,
+        'add_file': False,
         'add_item': False,
         'get_item': True,
         'get_riksbank_rate': True,

@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 {% from "_macros.html" import voucher, prep_form, book_form, skip_form, reopen_form %}
-{% block title %}{{ item.facts.counterparty or item.receipt.filename }}{% endblock %}
+{% block title %}{{ item.facts.counterparty or (item.files[0].filename if item.files else 'Item ' ~ item.id[:12]) }}{% endblock %}
 {% block main %}
+{% set label = item.facts.counterparty or (item.files[0].filename if item.files else 'Item ' ~ item.id[:12]) %}
 <p class="back"><a href="/items">← All items</a></p>
-<h1>{{ item.facts.counterparty or item.receipt.filename }}
+<h1>{{ label }}
   <span class="status {{ item.status }}">{{ item.status }}</span></h1>
 <p class="keyfacts">
   {{ item.facts.date or 'No date' }}
@@ -22,28 +23,58 @@
 {% endif %}
 
 <div class="split">
-<section class="receipt" aria-label="Receipt">
-  {% if not has_receipt %}
-  <p class="empty">The receipt file for this item is missing.</p>
+<section class="receipt" aria-label="Files">
+  {% if not shown %}
+  <p class="empty">No file documents this item yet. Add the receipt or invoice below.</p>
+  {% elif not shown_here %}
+  <p class="empty">The file {{ shown.filename }} is missing.</p>
   {% elif preview == 'image' %}
-  <a href="/receipts/{{ item.id }}"><img src="/receipts/{{ item.id }}" alt="The receipt, {{ item.receipt.filename }}"></a>
+  {% set url = '/items/' ~ item.id ~ '/files/' ~ shown.sha256 %}
+  <a href="{{ url }}"><img src="{{ url }}" alt="{{ shown.kind }}: {{ shown.filename }}"></a>
   {% else %}
-  <iframe src="/receipts/{{ item.id }}" title="The receipt, {{ item.receipt.filename }}"></iframe>
+  <iframe src="/items/{{ item.id }}/files/{{ shown.sha256 }}" title="{{ shown.kind }}: {{ shown.filename }}"></iframe>
   {% endif %}
-  {% if has_receipt %}
-  <p class="sub">{{ item.receipt.filename }} · {{ (item.receipt.bytes / 1024)|round(0, 'ceil')|int }} kB ·
-    <a href="/receipts/{{ item.id }}" target="_blank" rel="noopener">Open</a> ·
-    <a href="/receipts/{{ item.id }}?download">Download</a></p>
-  <p class="hint">A working copy. The archived receipt belongs in your bookkeeping service.</p>
+  {% if item.files %}
+  <ul class="files">
+    {% for file in item.files %}
+    {% set url = '/items/' ~ item.id ~ '/files/' ~ file.sha256 %}
+    <li>
+      {% if shown and file.sha256 == shown.sha256 %}<strong>{{ file.filename }}</strong>{% else %}<a href="/items/{{ item.id }}?file={{ file.sha256 }}">{{ file.filename }}</a>{% endif %}
+      <span class="sub">· {{ file.kind }} · {{ (file.bytes / 1024)|round(0, 'ceil')|int }} kB ·
+      <a href="{{ url }}" target="_blank" rel="noopener">Open</a> · <a href="{{ url }}?download">Download</a></span>
+      <details class="inline">
+        <summary class="sub">Remove</summary>
+        <form method="post" action="/items/{{ item.id }}/remove-file" class="row">
+          <input type="hidden" name="csrf" value="{{ session.csrf }}">
+          <input type="hidden" name="sha256" value="{{ file.sha256 }}">
+          <label class="check"><input type="checkbox" name="confirm" required> Remove and delete this file</label>
+          <button class="danger">Remove</button>
+        </form>
+      </details>
+    </li>
+    {% endfor %}
+  </ul>
   {% endif %}
+  <form method="post" action="/items/{{ item.id }}/files" enctype="multipart/form-data" class="row boxed">
+    <input type="hidden" name="csrf" value="{{ session.csrf }}">
+    <label for="add-file" class="hidden">File</label>
+    <input id="add-file" name="file" type="file" required>
+    <label for="add-kind" class="hidden">What it is</label>
+    <select id="add-kind" name="kind">
+      {% for kind in file_kinds %}<option value="{{ kind }}">{{ kind }}</option>{% endfor %}
+    </select>
+    <button class="quiet">Add file</button>
+  </form>
+  <p class="hint">document: the receipt or invoice. payment: the bank or card statement's record of what
+  was paid, such as the amount drawn in SEK. Working copies: the archive belongs in your bookkeeping service.</p>
 </section>
 
 <div class="forms">
 <section class="panel" id="status">
   <h2>Status</h2>
   {% if item.status == 'booked' %}
-  <p>Booked {{ item.booking.date }} as voucher <strong>{{ item.booking.voucher }}</strong>, with the receipt
-  attached in the bookkeeping service.</p>
+  <p>Booked {{ item.booking.date }} as voucher <strong>{{ item.booking.voucher }}</strong>{% if item.booking.receipt_attached %},
+  with the files archived{% endif %}.</p>
   {% elif item.status == 'skipped' %}
   <p>Skipped: {{ item.skip_reason }}</p>
   {% elif item.status == 'prepped' %}
@@ -198,9 +229,9 @@
   <summary>Delete this item</summary>
   <form method="post" action="/items/{{ item.id }}/delete" class="stack">
     <input type="hidden" name="csrf" value="{{ session.csrf }}">
-    <p class="hint">Deletes the item and its receipt file from TallyQueue. If the receipt is still
-    in your mail, the next scan adds it again: to keep it out of the list, skip it instead.</p>
-    <label class="check"><input type="checkbox" name="confirm"> Delete the item and its receipt file</label>
+    <p class="hint">Deletes the item and all its files from TallyQueue. If a file is still in your
+    mail, the next scan adds it again: to keep it out of the list, skip it instead.</p>
+    <label class="check"><input type="checkbox" name="confirm"> Delete the item and its files</label>
     <div><button class="danger">Delete</button></div>
   </form>
 </details>

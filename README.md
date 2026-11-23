@@ -25,12 +25,15 @@ transactions a year.
 2. The client hands each one to TallyQueue over [MCP](https://modelcontextprotocol.io): the file,
    the facts read from it (date, counterparty, amount, currency, VAT) and a proposed *kontering*
    (accounts and VAT treatment).
-3. TallyQueue keeps the list. An item is identified by the checksum of its receipt file, so
-   scanning the same inbox again adds nothing twice.
+3. TallyQueue keeps the list. An item is one purchase or sale, with the files that document
+   it: the receipt or invoice, and for a purchase in another currency the bank's or card
+   issuer's record of what was drawn in SEK. Each file is known by its checksum, so scanning the
+   same inbox again adds nothing twice.
 4. You open the list in the web page, look at each receipt, correct the proposal and book it in
    your bookkeeping service.
-5. You mark the item as booked, with the voucher number it got there and a tick that the receipt
-   was attached there.
+5. You mark the item as booked, with the voucher number it got there. A tick says you have
+   archived its files, in the bookkeeping service or in a folder of your own when the service keeps
+   no documents; it is optional.
 
 An item is `new`, then `prepped` (checked and ready to book), then `booked`. An item that should
 not be booked, such as a private purchase, is `skipped`.
@@ -145,14 +148,16 @@ Open `PUBLIC_URL` and sign in with your token. The list shows what is left to do
 proposed kontering written out as a voucher: account, its name from your list, debit and credit.
 
 You change an item's status by hand, in the list or on the item's own page: prepped, booked
-(with the voucher number, and a tick that the receipt is attached to it in your bookkeeping
-service) or skipped (with a reason), and back to new. A prepped item has the booking form right
-in its row, so after booking something you type the voucher number, tick the box and are done.
+(with the voucher number, and if you like a tick that its files are archived) or skipped (with
+a reason), and back to new. A prepped item has the booking form right in its row, so after
+booking something you type the voucher number and are done.
 
-The item's page shows the receipt beside its status, the kontering and the facts, which you can
-correct. For another currency than SEK the facts take the exchange rate or the total in SEK, and
-under them a button fetches Riksbanken's rate for a date. You can also add a receipt file by
-hand, and delete an item.
+The item's page shows its files beside its status, the kontering and the facts, which you can
+correct. Each file has a kind: `document` (the receipt or invoice), `payment` (the bank's or card
+issuer's record of what was paid) or `other`. You pick which file to view, add one, or remove
+one. A prepped or booked item keeps at least one file. For another currency than SEK the facts
+take the exchange rate or the total in SEK, and under them a button fetches Riksbanken's rate for
+a date. You can also add an item by hand, and delete one with all its files.
 
 Under **Accounts** you paste the accounts you use, one per line (`1930 Företagskonto`). A SIE
 file can be pasted as it is; only its `#KONTO` and `#SRU` lines are read. TallyQueue then warns
@@ -195,14 +200,15 @@ The single quotes store the placeholder, and `claude` fills it in from the envir
 
 | Tool | What it does |
 |---|---|
-| `add_item` | Adds a receipt or invoice file, with the facts read from it and a proposed kontering, as new or straight to prepped or skipped. The same file again changes nothing |
+| `add_item` | Adds an item, with the facts and a proposed kontering, and its first file when that is small; as new or straight to prepped or skipped. A file already in the list changes nothing |
+| `add_file` | Adds a small file, such as a bank notice saved as text, to an item. A client cannot remove files: you do that in the web page |
 | `list_items` | The list, by status (`todo` is new and prepped) or by text, with a count per status |
 | `get_item` | One item in full, with what is missing, warnings and its history, and your entries for the accounts in its kontering |
 | `update_item` | Changes the facts, the proposed kontering, the status or the notes |
 | `list_accounts` | Your own list of accounts, if you have pasted one, with their VAT box, NE row and SRU code. Can be asked about some accounts only |
 | `add_accounts` | Adds accounts to your list. Refused unless you have switched it on in the web page, which lasts an hour |
 | `get_riksbank_rate` | Riksbanken's rate for a currency on a date. Stores nothing; the client gives the rate to `update_item` |
-| `upload_ticket` | A one-use ticket for uploading one file to `/upload`, for a client that can run `curl` but does not hold your token |
+| `upload_ticket` | A one-use ticket for uploading one file to `/upload`, as a new item or to an item you name, for a client that can run `curl` but does not hold your token |
 
 The server's instructions and the tool descriptions tell the client the rules:
 
@@ -213,12 +219,14 @@ The server's instructions and the tool descriptions tell the client the rules:
 - Every item gets a proposed kontering, also when the client is unsure: what is open goes in its
   note, and alike documents are treated alike. It is in SEK and balances. For another currency
   the client gives the exchange rate or the total in SEK, with its source.
-- Two documents for one purchase, such as an invoice and its receipt, are both added. One carries
-  the facts and the kontering, and the other is skipped with a reason that names it.
+- One purchase is one item, with the files that together document it. Of two documents that say
+  the same, such as an order confirmation and the receipt, the client keeps the better record of
+  what happened. For another currency, the bank's or card issuer's record of what was drawn in SEK
+  goes with the receipt, as kind `payment`; until it is there, the item says so in a warning.
 - An item is marked prepped only when the client has no open question about it, and booked only
   when you give the voucher number.
 
-A client can add and change items but not delete them.
+A client can add and change items and add files, but not delete items or remove files.
 
 Then ask, for example: *"Go through my mail from October, find receipts and invoices for my
 business, and add each one to TallyQueue with its facts and a proposed kontering."*
@@ -251,15 +259,16 @@ upload, and the web page is the way in from there.
 ## Your data
 
 - Everything is in the `data` volume, as ordinary files: `users/<name>/items/<sha256>.json` (one
-  item each, readable as text), `users/<name>/receipts/<sha256>.<ext>` (the file as it arrived),
+  item each, readable as text), `users/<name>/receipts/<sha256>.<ext>` (each file as it arrived),
   `users/<name>/accounts.json` and `users/<name>/settings.json` (what you have switched on). Back
   up the volume to back up TallyQueue.
 - Accepted files: PDF, PNG, JPEG, WebP, GIF, and UTF-8 text such as a saved mail.
 - Nothing is encrypted at rest. Nothing about your receipts or items is sent anywhere. The only
   outgoing request is the Riksbanken rate lookup, when you ask for it, and it carries only the
   currency code and dates; `RIKSBANK_LOOKUP=0` turns it off.
-- The receipts here are working copies. The archive that the law asks for is the one in your
-  bookkeeping service: an item is not `booked` until you tick that the receipt is attached there.
+- The files here are working copies. The archive that the law asks for is yours to keep: in your
+  bookkeeping service, or in a folder of your own when the service keeps no documents. The tick
+  on a booked item notes that it is done.
 
 ## Development
 

@@ -36,15 +36,19 @@ INSTRUCTIONS = """TallyQueue is the user's to-do list of receipts and invoices t
 It is a helper, not a ledger: the user does the bookkeeping in their own bookkeeping service, and
 checks every figure first.
 
-- For each receipt or invoice you find (for example in the user's mail), add it once. A small text
-  receipt can go to add_item in file_base64. Any other file: save it, get a ticket with
-  upload_ticket, run the curl command it gives, then update_item with the id from the reply. When
-  you cannot run a command, ask the user to add the file in the web page and find it with
-  list_items. Never write out a PDF or an image as base64. An item's id is the SHA-256 of its
-  file, so adding the same file again changes nothing.
-- Two documents for one purchase, such as an invoice and its receipt: add both, so that both files
-  are kept. Put the facts and the kontering on the one that shows the payment, and skip the other
-  with a reason that names the first.
+- An item is one purchase or sale, with the files that document it. For each one you find (for
+  example in the user's mail), add one item, and add each of its files to that item. A file
+  belongs to one item: adding it again changes nothing.
+- Getting a file in: a small text file, such as a saved mail, can go in file_base64 (add_item for
+  the first file, add_file for more). Any other file: save it, get a ticket with upload_ticket
+  (with item_id for a file of an item you already added) and run the curl command it gives. When
+  you cannot run a command, ask the user to add the file in the web page, and find it with
+  list_items. Never write out a PDF or an image as base64.
+- Which files: those that together document the event. When two documents say the same thing,
+  such as an order confirmation and the receipt, keep the one that is the better record of what
+  happened (usually the one that shows the payment) and leave the other out. For a purchase in
+  another currency, the bank or card statement's record of what was drawn in SEK belongs with the
+  receipt: add it as kind payment. Facts and the kontering are on the item, once.
 - Facts are what the document says, and nothing else. Leave a fact out rather than guess: no
   payment date unless the document or a statement gives one, and no VAT amount when the document
   shows none. Amounts are strings with two decimals ("1250.00").
@@ -71,7 +75,7 @@ checks every figure first.
   An open question is one only the user can answer, such as whether a purchase belongs to the
   business or which of two VAT treatments applies. A rate from Riksbanken, or an account the
   user has not listed, is not one: say it in the note. Booked means the user booked it in their bookkeeping service: mark it only when the user
-  tells you the voucher number and that the receipt is attached there. Use skipped, with a
+  tells you the voucher number. Use skipped, with a
   reason, for what should not be booked.
 """
 
@@ -223,9 +227,34 @@ def _row(item: dict) -> dict:
         'vat_amount': facts['vat_amount'],
         'kontering': _lines(item['kontering']),
         'voucher': (item['booking'] or {}).get('voucher'),
-        'file': item['receipt']['filename'],
+        'files': [f['filename'] for f in item['files']],
     }
     return {k: v for k, v in row.items() if v is not None}
+
+
+def _file_out(file: dict) -> dict:
+    """One of an item's files as a client sees it."""
+    return {k: file.get(k) for k in ('sha256', 'filename', 'kind', 'media_type', 'bytes', 'added')}
+
+
+def _decode(file_base64: str) -> bytes:
+    raw = file_base64.strip()
+    if raw.startswith('data:') and ',' in raw:
+        raw = raw.split(',', 1)[1]
+    try:
+        return base64.b64decode(''.join(raw.split()), validate=True)
+    except (binascii.Error, ValueError):
+        raise ToolError('file_base64 is not valid base64. Send the file bytes, base64-encoded.') from None
+
+
+FileKind = Annotated[
+    Literal['document', 'payment', 'other'] | None,
+    Field(
+        description='What the file is. document (the default): the receipt, invoice or credit note. '
+        "payment: the bank or card statement's record of the payment, such as what was drawn in SEK. "
+        'other: anything else that documents the item.'
+    ),
+]
 
 
 def _view(user: str, item: dict, *, history: bool = False) -> dict:
@@ -248,7 +277,7 @@ def _view(user: str, item: dict, *, history: bool = False) -> dict:
         'skip_reason': item['skip_reason'],
         'notes': item['notes'],
         'source': item['source'],
-        'receipt': {k: item['receipt'][k] for k in ('filename', 'media_type', 'bytes')},
+        'files': [_file_out(f) for f in item['files']],
         'created': item['created'],
         'updated': item['updated'],
         'missing_for_prepped': model.prep_problems(item) if item['status'] == 'new' else [],
@@ -280,16 +309,14 @@ mcp = MCPServer(
 
 
 @mcp.tool(
-    description=f"""Add a receipt or invoice to the user's list of things to book. Returns the item.
+    description=f"""Add an item, one purchase or sale, to the user's list of things to book. Returns the item.
 
-The file is required: {store.ACCEPTED}. Its SHA-256 is the item's id. If the same file is already in the
-list, nothing changes and the existing item comes back with created=false, so scanning an inbox twice
-is safe. To change an existing item, use update_item.
-
-Send the file base64-encoded in file_base64 only when it is small, such as a short text receipt. A PDF
-or an image of any real size goes another way: when you can run curl where the file is, get a ticket
-with upload_ticket and run the command it gives, then call update_item with the id from the reply;
-when you cannot, ask the user to add the file in the web page and find it with list_items.
+file_base64: its first file, when that is small, such as a saved mail as text ({store.ACCEPTED}). If
+that file is already in the list, nothing changes and the item that has it comes back with
+created=false, so scanning an inbox twice is safe. A PDF or an image of any real size never goes here:
+leave file_base64 out, and add the file with a ticket from upload_ticket (with this item's id), or
+start with the upload and add the facts with update_item. Add more files with add_file or
+upload_ticket. To change an existing item, use update_item.
 
 facts: only what the document says (date, counterparty, amount, currency, VAT). Leave out what is not
 there; never guess. For another currency than SEK, also give exchange_rate or amount_sek, with
@@ -304,9 +331,12 @@ and status_not_set in the answer says why.""",
     structured_output=False,
 )
 async def add_item(
-    file_base64: Annotated[str, Field(description='The file, base64-encoded.', min_length=1)],
     ctx: Context,
+    file_base64: Annotated[
+        str | None, Field(description='The first file, base64-encoded: only a small one.', min_length=1)
+    ] = None,
     filename: Annotated[str | None, Field(description='The file name, e.g. invoice-1042.pdf.')] = None,
+    file_kind: FileKind = None,
     source: Annotated[str | None, Field(description='Where it came from.', max_length=300)] = None,
     facts: Annotated[Facts | None, Field(description='What the document says.')] = None,
     kontering: Annotated[Kontering | None, Field(description='Proposed booking, in SEK.')] = None,
@@ -320,19 +350,14 @@ async def add_item(
     skip_reason: Annotated[str | None, Field(description='Why it is skipped.', max_length=300)] = None,
 ) -> list:
     user = _user(ctx)
-    raw = file_base64.strip()
-    if raw.startswith('data:') and ',' in raw:
-        raw = raw.split(',', 1)[1]
-    try:
-        data = base64.b64decode(''.join(raw.split()), validate=True)
-    except (binascii.Error, ValueError):
-        raise ToolError('file_base64 is not valid base64. Send the file bytes, base64-encoded.') from None
+    data = _decode(file_base64) if file_base64 else None
     item, created = await _store(
         store.add_item,
         user,
         data,
         filename or '',
         via='mcp',
+        kind=file_kind,
         source=source,
         facts=_given(facts),
         kontering=_given(kontering),
@@ -361,6 +386,31 @@ async def add_item(
     if status_not_set:
         reply['status_not_set'] = status_not_set
     return [_text(reply)]
+
+
+@mcp.tool(
+    description="""Add a small file, base64-encoded, to an item that is already in the list: for example
+the bank's notice of a card payment, saved as text. Returns the item.
+
+Only for a small file. A PDF or an image goes with a ticket from upload_ticket, with item_id. Add a
+file only when it adds to what the item's other files show; see the server instructions on which
+files to keep. The same file again changes nothing; a file that another item has is refused.""",
+    annotations=_ADDS,
+    structured_output=False,
+)
+async def add_file(
+    id: Annotated[str, Field(description="The item's id, or its first 8 or more characters.")],
+    file_base64: Annotated[str, Field(description='The file, base64-encoded.', min_length=1)],
+    ctx: Context,
+    filename: Annotated[str | None, Field(description='The file name.')] = None,
+    kind: FileKind = None,
+) -> list:
+    user = _user(ctx)
+    item, added = await _store(
+        store.add_file, user, id, _decode(file_base64), filename or '', via='mcp', kind=kind
+    )
+    view = await _store(_view, user, item)
+    return [_text({'added': added, 'item': view})]
 
 
 @mcp.tool(
@@ -426,8 +476,9 @@ status:
   have no open question about the item; with a doubt, leave it new. It means "ready for the user
   to book", not that it is correct: the user checks it.
 - booked: the user has booked it in their bookkeeping service. Send voucher (the voucher number there,
-  e.g. "A 12") and receipt_attached=true (the receipt is attached to that voucher there). Only do this
-  when the user tells you both. Never guess a voucher number.
+  e.g. "A 12"). Only do this when the user tells you the number. Never guess a voucher number.
+  receipt_attached=true says the user has archived the files, in the bookkeeping service or in a
+  folder of their own; send it only when the user says so. It is not needed for booked.
 - skipped: it should not be booked (private purchase, not a receipt, same purchase as another item).
   Send skip_reason.
 - new: back to the start, for unfinished work.
@@ -446,7 +497,11 @@ async def update_item(
         str | None, Field(description='Voucher number in the bookkeeping service.', max_length=50)
     ] = None,
     receipt_attached: Annotated[
-        bool | None, Field(description='The receipt is attached to the voucher in the bookkeeping service.')
+        bool | None,
+        Field(
+            description='The user has archived the files, in the bookkeeping service or a folder of their own. '
+            'Optional, only when the user says so.'
+        ),
     ] = None,
     skip_reason: Annotated[str | None, Field(description='Why it is skipped.', max_length=300)] = None,
     notes: Annotated[str | None, Field(description='Replaces the notes.', max_length=4000)] = None,
@@ -561,8 +616,9 @@ async def health(request: Request) -> Response:
 
 
 @mcp.tool(
-    description="""A one-use ticket to upload one receipt or invoice file to POST /upload, for when you have
-the file on disk and can run a command such as curl, but not the user's token.
+    description="""A one-use ticket to upload one file to POST /upload, for when you have the file on disk
+and can run a command such as curl, but not the user's token. With item_id, the file is added to that
+item; without, it makes a new item.
 
 This is the way to add a file of any real size. add_item takes the file as base64 in the call, which
 suits only a small text receipt: never write out a PDF or an image as base64. When you can neither
@@ -576,7 +632,8 @@ shasum -a 256), when you can: then only that exact file is taken, so a ticket th
 anyone else is of no use to them. Keep the ticket out of anything you write for the user.
 
 The upload replies with the item's id; add the facts and a proposed kontering with update_item. The
-same file again adds nothing: it returns the item that is there.""",
+same file again adds nothing: it returns the item that is there. A file that another item has is
+refused when it is meant for item_id.""",
     annotations=_TICKET,
     structured_output=False,
 )
@@ -590,11 +647,19 @@ async def upload_ticket(
         str | None,
         Field(description="The file's name, for the command in the reply.", max_length=200),
     ] = None,
+    item_id: Annotated[
+        str | None,
+        Field(
+            description='The item to add the file to, or its first 8 or more characters. Leave out for a new item.'
+        ),
+    ] = None,
+    kind: FileKind = None,
 ) -> list:
     user = _user(ctx)
     digest = sha256.strip().lower() if sha256 else None
+    target = (await _store(store.get_item, user, item_id))['id'] if item_id else None
     try:
-        ticket, expires = TICKETS.create(user, digest)
+        ticket, expires = TICKETS.create(user, digest, target, kind)
     except ValueError as e:
         raise ToolError(str(e)) from None
     name = (filename or '').strip() or 'receipt.pdf'
@@ -611,8 +676,10 @@ async def upload_ticket(
                 'url': f'{config.PUBLIC_URL}/upload',
                 'expires': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires)),
                 'only_this_file': digest,
+                'to_item': target,
                 'command': command,
-                'next': 'Run the command where the file is. The reply has the item id: then update_item.',
+                'next': 'Run the command where the file is.'
+                + ('' if target else ' The reply has the new item id: then update_item.'),
             }
         )
     ]
@@ -650,8 +717,11 @@ async def upload(request: Request) -> Response:
         found = TICKETS.spend(ticket)
         if not found:
             return JSONResponse({'error': f'unauthorized: {auth.ticket_refused(ticket)}'}, status_code=401)
-        user, only = found.user, found.sha256
+        user, only, target, kind = found.user, found.sha256, found.item, found.kind
     else:
+        # With the token, a script may name the item and the kind itself.
+        target = (request.headers.get('x-item-id') or '').strip() or None
+        kind = (request.headers.get('x-file-kind') or '').strip() or None
         user = auth.user_for_headers(request.headers)
         if not user:
             why = auth.why_refused(auth.token_from_headers(request.headers))
@@ -676,20 +746,37 @@ async def upload(request: Request) -> Response:
         )
     filename = unquote(request.headers.get('x-filename', ''))
     try:
-        item, created = await anyio.to_thread.run_sync(
-            lambda: store.add_item(user, data, filename, via='upload')
-        )
+        if target:
+            item, created = await anyio.to_thread.run_sync(
+                lambda: store.add_file(user, target, data, filename, via='upload', kind=kind)
+            )
+        else:
+            item, created = await anyio.to_thread.run_sync(
+                lambda: store.add_item(user, data, filename, via='upload', kind=kind)
+            )
+    except store.NotFound as e:
+        return JSONResponse({'error': str(e)}, status_code=404)
     except (store.StoreError, model.Invalid) as e:
         return JSONResponse({'error': str(e)}, status_code=400)
+    sha256 = hashlib.sha256(data).hexdigest()
+    if target:
+        nxt = (
+            'The file was added to the item.'
+            if created
+            else 'The item already has this file. Nothing was changed.'
+        )
+    elif created:
+        nxt = 'Call update_item with this id to add the facts and a proposed kontering.'
+    else:
+        nxt = 'This file was already in the list. Nothing was changed.'
     reply = {
         'id': item['id'],
         'created': created,
         'status': item['status'],
-        'receipt': {k: item['receipt'][k] for k in ('filename', 'media_type', 'bytes')},
+        'file': _file_out(store.find_file(item, sha256) or {}),
+        'files': len(item['files']),
         'web_page': f'{config.PUBLIC_URL}/items/{item["id"]}',
-        'next': 'Call update_item with this id to add the facts and a proposed kontering.'
-        if created
-        else 'This file was already in the list. Nothing was changed.',
+        'next': nxt,
     }
     return JSONResponse(reply, status_code=201 if created else 200)
 

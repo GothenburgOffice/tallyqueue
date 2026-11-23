@@ -369,6 +369,31 @@ details.panel[open] > summary {
   height: 78vh;
 }
 
+.files {
+  margin: 0.75rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.files li {
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+details.inline {
+  display: inline;
+}
+
+details.inline > summary {
+  display: inline;
+  cursor: pointer;
+}
+
+details.inline[open] > form {
+  margin-top: 0.4rem;
+}
+
 @media (max-width: 60rem) {
   .split {
     grid-template-columns: minmax(0, 1fr);

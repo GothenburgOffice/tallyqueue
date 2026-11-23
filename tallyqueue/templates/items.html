@@ -39,7 +39,7 @@
     <tr>
       <td class="nowrap">{{ facts.date or '–' }}</td>
       <td>
-        <a href="/items/{{ item.id }}">{{ facts.counterparty or item.receipt.filename }}</a>
+        <a href="/items/{{ item.id }}">{{ facts.counterparty or (item.files[0].filename if item.files else 'Item ' ~ item.id[:12]) }}</a>{% if item.files|length > 1 %} <span class="sub">· {{ item.files|length }} files</span>{% endif %}
         {% if facts.description %}<div class="sub">{{ facts.description }}</div>{% endif %}
       </td>
       <td class="num nowrap">

@@ -46,7 +46,10 @@ FLASH = {
     'saved': 'Saved.',
     'added': 'Added to the list.',
     'duplicate': 'That file is already in the list. This is the item; nothing was changed.',
-    'deleted': 'The item and its receipt were deleted.',
+    'deleted': 'The item and its files were deleted.',
+    'file_added': 'The file was added to the item.',
+    'file_known': 'The item already has that file; nothing was changed.',
+    'file_removed': 'The file was removed from the item and deleted.',
     'accounts': 'Your list of accounts was saved.',
     'client_on': 'The AI client may now add accounts to your list. It stops by itself after an hour.',
     'client_off': 'The AI client can no longer add accounts.',
@@ -278,6 +281,8 @@ def _sek_fields(saved: dict) -> dict:
 
 async def _item_page(request: Request, session: auth.Session, item: dict, **context) -> Response:
     everything = await _run(store.all_items, session.user)
+    # The file shown beside the forms: the one picked in the list of files, else the first.
+    shown = store.find_file(item, request.query_params.get('file', '')) or store.find_file(item, None)
     accounts = await _run(store.read_accounts, session.user)
     draft_kontering = context.pop('draft_kontering', None)
     kontering = draft_kontering or item['kontering'] or {}
@@ -325,8 +330,10 @@ async def _item_page(request: Request, session: auth.Session, item: dict, **cont
         account_names={a['account']: a['name'] for a in accounts},
         prep_problems=model.prep_problems(item),
         warnings=model.warnings(item, accounts, everything),
-        has_receipt=store.receipt_path(session.user, item) is not None,
-        preview='image' if item['receipt']['ext'] in IMAGES else 'frame',
+        shown=shown,
+        shown_here=shown is not None and store.file_path(session.user, shown) is not None,
+        preview='image' if shown and shown['ext'] in IMAGES else 'frame',
+        file_kinds=model.FILE_KINDS,
         flash=FLASH.get(request.query_params.get('msg', '')),
         **context,
     )
@@ -394,10 +401,15 @@ async def change(request: Request) -> Response:
                 riksbank.rate, current['facts']['currency'] or '', str(form.get('rate_date', ''))
             )
             changes = {'facts': {'exchange_rate': found['rate'], 'exchange_rate_source': found['source']}}
+        elif action == 'remove-file':
+            if 'confirm' not in form:
+                raise store.StoreError('Tick the box to confirm that the file should be removed and deleted')
+            await _run(store.remove_file, session.user, ref, str(form.get('sha256', '')), via='web')
+            return _redirect(f'/items/{ref}?msg=file_removed')
         elif action == 'delete':
             if 'confirm' not in form:
                 raise store.StoreError(
-                    'Tick the box to confirm that the item and its receipt should be deleted'
+                    'Tick the box to confirm that the item and its files should be deleted'
                 )
             await _run(store.delete_item, session.user, ref)
             return _redirect('/items?msg=deleted')
@@ -419,8 +431,28 @@ async def change(request: Request) -> Response:
     return _redirect(f'/items/{ref}?msg={"rate" if action == "riksbanken" else "saved"}')
 
 
+async def add_file(request: Request) -> Response:
+    """A file added by hand to an item that is already in the list."""
+    session, form, refusal = await _post(request, max_bytes=store.MAX_RECEIPT_BYTES + 64 * 1024)
+    if refusal:
+        return refusal
+    ref = request.path_params['id']
+    upload = form.get('file')
+    if not hasattr(upload, 'read') or not upload.filename:
+        return _message(session, 400, 'No file', 'Choose a file to add to the item.')
+    data = await upload.read()
+    kind = str(form.get('kind', '')) or None
+    try:
+        _, added = await _run(store.add_file, session.user, ref, data, upload.filename, via='web', kind=kind)
+    except store.NotFound as e:
+        return _message(session, 404, 'Not found', str(e))
+    except (store.StoreError, model.Invalid) as e:
+        return _message(session, 400, 'Not added', str(e))
+    return _redirect(f'/items/{ref}?msg={"file_added" if added else "file_known"}')
+
+
 async def receipt(request: Request) -> Response:
-    """The receipt file itself, for the signed-in user only.
+    """One of an item's files, for the signed-in user only.
 
     The type comes from the file's content when it was added. Anything that is not a PDF or an
     image is sent as plain text in a sandbox, so a saved HTML mail is shown as text, never run.
@@ -432,17 +464,18 @@ async def receipt(request: Request) -> Response:
         found = await _run(store.get_item, session.user, request.path_params['id'])
     except store.StoreError as e:
         return _message(session, 404, 'Not found', str(e))
-    path = store.receipt_path(session.user, found)
+    file = store.find_file(found, request.path_params['sha256'].lower())
+    path = store.file_path(session.user, file) if file else None
     if not path:
-        return _message(session, 404, 'Not found', 'The receipt file for this item is missing.')
-    media = MEDIA.get(found['receipt']['ext'])
+        return _message(session, 404, 'Not found', 'This item has no such file.')
+    media = MEDIA.get(file['ext'])
     policy = RECEIPT_POLICY if media else f'{RECEIPT_POLICY}; sandbox'
     disposition = 'attachment' if 'download' in request.query_params else 'inline'
     return FileResponse(
         path,
         media_type=media or 'text/plain; charset=utf-8',
         headers={
-            'Content-Disposition': f"{disposition}; filename*=UTF-8''{quote(found['receipt']['filename'])}",
+            'Content-Disposition': f"{disposition}; filename*=UTF-8''{quote(file['filename'])}",
             'Content-Security-Policy': policy,
             'X-Frame-Options': 'SAMEORIGIN',
             'Cache-Control': 'private, no-store',
@@ -514,8 +547,10 @@ ROUTES = (
     ('/items', ['GET'], items),
     ('/items', ['POST'], add),
     ('/items/{id}', ['GET'], item),
+    # Before the general action route, which would take /items/{id}/files too.
+    ('/items/{id}/files', ['POST'], add_file),
+    ('/items/{id}/files/{sha256}', ['GET'], receipt),
     ('/items/{id}/{action}', ['POST'], change),
-    ('/receipts/{id}', ['GET'], receipt),
     ('/accounts', ['GET'], accounts),
     ('/accounts', ['POST'], save_accounts),
     ('/accounts/client', ['POST'], accounts_from_client),
