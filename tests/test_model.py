@@ -171,6 +171,14 @@ def test_accounts_given_one_by_one_are_checked():
             model.clean_accounts(bad)
     with pytest.raises(model.Invalid):
         model.clean_accounts([{'account': '1930', 'name': 'x' * 201}])
+    with_codes = [
+        {'account': '2614', 'name': 'Utgående moms omvänd', 'vat_box': 'D30', 'ne_row': 'B14', 'sru': None}
+    ]
+    assert model.clean_accounts(with_codes) == [
+        {'account': '2614', 'name': 'Utgående moms omvänd', 'vat_box': 'D30', 'ne_row': 'B14'}
+    ]
+    with pytest.raises(model.Invalid, match='not a NE row'):
+        model.clean_accounts([{'account': '2614', 'name': 'x', 'ne_row': 'Z9'}])
 
 
 def test_a_skipped_item_is_no_twin_to_warn_about():
@@ -296,6 +304,54 @@ def test_accounts_are_parsed_from_plain_lines_and_sie_lines():
     ]
     with pytest.raises(Invalid, match='Line 2'):
         model.parse_accounts('1930 Bank\nBank account\n')
+
+
+def test_accounts_keep_the_codes_a_printed_chart_has_after_the_name():
+    # Made-up lines in the shape of a printed chart: name, then VAT box, NE row and SRU code,
+    # each only when the account has one.
+    parsed = model.parse_accounts(
+        '1930 Företagskonto B9 7280\n'
+        '2611 Utgående moms 25 % B10 B14 7381\n'
+        '2618 Vilande utgående moms B14\n'
+        '2050 Expansionsfond U2\n'
+        '2019 Årets resultat 7300\n'
+        '3740 Öresavrundning E42 R4/R8 7400\n'
+        '6072 Representation, ej avdragsgill R6, R13 7501\n'
+        '8990 Resultat R11 R11 7440\n'
+        '4999 Konto 2024\n'
+        '2640;Ingående moms;F48;B14;7381\n'
+        '3001\tFörsäljning 25 %\tA05\t\t1234\n'
+    )
+    assert parsed == [
+        {'account': '1930', 'name': 'Företagskonto', 'ne_row': 'B9', 'sru': '7280'},
+        {'account': '2019', 'name': 'Årets resultat', 'sru': '7300'},
+        {'account': '2050', 'name': 'Expansionsfond', 'ne_row': 'U2'},
+        {'account': '2611', 'name': 'Utgående moms 25 %', 'vat_box': 'B10', 'ne_row': 'B14', 'sru': '7381'},
+        {'account': '2618', 'name': 'Vilande utgående moms', 'ne_row': 'B14'},
+        {'account': '2640', 'name': 'Ingående moms', 'vat_box': 'F48', 'ne_row': 'B14', 'sru': '7381'},
+        {'account': '3001', 'name': 'Försäljning 25 %', 'vat_box': 'A05', 'sru': '1234'},
+        {'account': '3740', 'name': 'Öresavrundning', 'vat_box': 'E42', 'ne_row': 'R4/R8', 'sru': '7400'},
+        {'account': '4999', 'name': 'Konto 2024'},
+        {'account': '6072', 'name': 'Representation, ej avdragsgill', 'ne_row': 'R6, R13', 'sru': '7501'},
+        {'account': '8990', 'name': 'Resultat R11', 'ne_row': 'R11', 'sru': '7440'},
+    ]
+    # written back as lines, the list reads the same, as the web page shows it to be saved again
+    assert model.parse_accounts('\n'.join(model.account_line(a) for a in parsed)) == parsed
+    with pytest.raises(Invalid, match='Line 1: "X1" is not a VAT box'):
+        model.parse_accounts('2640;Ingående moms;X1;B14;7381\n')
+    with pytest.raises(Invalid, match='not a SRU code'):
+        model.parse_accounts('2640;Ingående moms;F48;B14;73\n')
+
+
+def test_a_sie_files_sru_lines_give_its_accounts_their_codes():
+    parsed = model.parse_accounts(
+        '#SRU 1930 7280\n#KONTO 1930 "Företagskonto"\n#KONTO 2440 "Leverantörsskulder"\n'
+        '#SRU 2440 7382\n#SRU 9999 7000\n'
+    )
+    assert parsed == [
+        {'account': '1930', 'name': 'Företagskonto', 'sru': '7280'},
+        {'account': '2440', 'name': 'Leverantörsskulder', 'sru': '7382'},
+    ]
 
 
 def test_a_whole_sie_file_with_vouchers_keeps_its_accounts():

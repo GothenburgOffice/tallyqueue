@@ -829,6 +829,40 @@ def test_an_ai_client_adds_accounts_only_while_the_user_has_switched_it_on(alice
     assert [a['account'] for a in ok('list_accounts')['accounts']] == ['1930', '2440', '2640', '7010', '7020']
 
 
+def test_an_accounts_codes_reach_the_ai_client_and_survive_the_web_page(alice, hosting):
+    before = ok('list_accounts')['accounts']
+    source = (
+        '2440 Leverantörsskulder B15 7382\n2640 Ingående moms F48 B14 7381\n6230 Datakommunikation R6 7501\n'
+    )
+    assert alice.post('/accounts', {'accounts': source})[1]['location'] == '/accounts?msg=accounts'
+
+    # asked about some accounts, the client gets their codes, and hears which are not in the list
+    assert ok('list_accounts', {'accounts': ['2640', '1111']}) == {
+        'count': 3,
+        'accounts': [
+            {'account': '2640', 'name': 'Ingående moms', 'vat_box': 'F48', 'ne_row': 'B14', 'sru': '7381'}
+        ],
+        'not_in_list': ['1111'],
+    }
+    # an item shows the user's entries for the accounts in its kontering
+    used = ok('get_item', {'id': hosting['id']})['kontering_accounts']
+    assert [a['account'] for a in used] == ['2440', '2640', '6230'] and used[1]['vat_box'] == 'F48'
+
+    # the page shows the list so that saving it again keeps every code
+    page = alice.get('/accounts')[2].decode()
+    shown = html.unescape(re.search(r'<textarea[^>]*>(.*?)</textarea>', page, re.S).group(1))
+    assert '2640;Ingående moms;F48;B14;7381' in shown
+    assert alice.post('/accounts', {'accounts': shown})[0] == 303
+    assert (
+        ok('list_accounts')['count'] == 3
+        and ok('list_accounts', {'accounts': ['2640']})['accounts'][0]['sru'] == '7381'
+    )
+
+    # put back the list the other tests use
+    assert alice.post('/accounts', {'accounts': '\n'.join(model.account_line(a) for a in before)})[0] == 303
+    assert ok('list_accounts')['accounts'] == before
+
+
 def test_each_tool_says_whether_it_writes_so_a_client_can_ask_first():
     async def tools():
         async with (

@@ -8,12 +8,19 @@
   accounts: paste your own list, for example from your bookkeeping service.</p>
   <form method="post" action="/accounts" class="stack">
     <input type="hidden" name="csrf" value="{{ session.csrf }}">
-    <label for="accounts">One account per line: the number, then its name{% if count %} ({{ count }} saved){% endif %}</label>
+    <label for="accounts">One account per line: the number, its name and any codes{% if count %} ({{ count }} saved){% endif %}</label>
     <textarea id="accounts" name="accounts" rows="18" spellcheck="false" placeholder="1930 Företagskonto&#10;2640 Ingående moms">{{ source }}</textarea>
     <div><button>Save accounts</button></div>
   </form>
+  <p class="hint">After the name can come the codes your bookkeeping service gives the account,
+  as a printed chart has them: VAT box (momsruta), NE row (bokslut) and SRU code, such as
+  <code>2611 Utgående moms 25 % B10 B14 7381</code>. Where that could be read two ways, use five
+  columns separated by semicolons, with an empty one for a code the account has not:
+  <code>2611;Utgående moms 25 %;B10;B14;7381</code>. The AI client sees the codes with the
+  accounts.</p>
   <p class="hint">Saving replaces the whole list. A SIE file can be pasted as it is: only its
-  <code>#KONTO</code> lines are read. The list stays on this server, in your own data folder.</p>
+  <code>#KONTO</code> and <code>#SRU</code> lines are read. The list stays on this server, in your
+  own data folder.</p>
 </section>
 
 <section class="narrow wide">

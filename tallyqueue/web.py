@@ -456,7 +456,7 @@ async def accounts(request: Request) -> Response:
     if not session:
         return _to_login(request)
     current = await _run(store.read_accounts, session.user)
-    source = '\n'.join(f'{a["account"]} {a["name"]}'.rstrip() for a in current)
+    source = '\n'.join(model.account_line(a) for a in current)
     return _page(
         'accounts.html',
         session,
