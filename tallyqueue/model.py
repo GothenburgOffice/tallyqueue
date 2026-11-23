@@ -485,5 +485,5 @@ def parse_accounts(source: str) -> list[dict]:
 def account_line(account: dict) -> str:
     """An account written as one line that parse_accounts reads back the same."""
     if any(account.get(k) for k in ACCOUNT_CODES):
-        return ';'.join([account['account'], account['name'], *(account.get(k, '') for k in ACCOUNT_CODES)])
+        return ';'.join([account['account'], account['name'], *(account.get(k) or '' for k in ACCOUNT_CODES)])
     return f'{account["account"]} {account["name"]}'.rstrip()
