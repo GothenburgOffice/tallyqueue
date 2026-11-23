@@ -176,12 +176,27 @@ class Account(BaseModel):
     account: str = Field(description='Account number, 4 digits (up to 6).')
     name: str = Field(description="Its name in the user's chart of accounts.", max_length=200)
     vat_box: str | None = Field(
-        None, description="The box in the VAT return (momsruta) the user's chart gives it, such as B10 or 48."
+        None,
+        description="The box in the VAT return (momsruta) the user's chart gives it: a letter A to I and two "
+        'digits as bookkeeping programs write it, such as B10 or F48, or the two digits alone. Leave it out '
+        'when the chart gives none.',
     )
     ne_row: str | None = Field(
-        None, description="The row in the NE appendix (bokslut) the user's chart gives it, such as B9 or R6."
+        None,
+        description="The row in the NE appendix (bokslut) the user's chart gives it: B, R or U and a number, "
+        'such as B9, R6 or U2, or two of them as "R6, R13" or "R4/R8". Leave it out when the chart gives none.',
     )
-    sru: str | None = Field(None, description="The SRU code the user's chart gives it, such as 7280.")
+    sru: str | None = Field(
+        None,
+        description="The SRU code the user's chart gives it: four digits, such as 7280. Leave it out when none.",
+    )
+
+
+def _account_out(account: dict) -> dict:
+    """An account as a client sees it: every code field there, null when the user's list gives none."""
+    return {'account': account['account'], 'name': account['name']} | {
+        k: account.get(k) for k in model.ACCOUNT_CODES
+    }
 
 
 def _user(ctx: Context) -> str:
@@ -254,7 +269,7 @@ def _view(user: str, item: dict, *, history: bool = False) -> dict:
         'missing_for_prepped': model.prep_problems(item) if item['status'] == 'new' else [],
         # The user's own entries for the accounts in the kontering, with their codes (VAT box, NE
         # row, SRU code) when the user's chart has them.
-        'kontering_accounts': [a for a in accounts if a['account'] in used],
+        'kontering_accounts': [_account_out(a) for a in accounts if a['account'] in used],
         'warnings': model.warnings(item, accounts, store.all_items(user)),
         'web_page': f'{config.PUBLIC_URL}/items/{item["id"]}',
     }
@@ -468,11 +483,23 @@ page. Use these account numbers in a kontering. An empty list means the user has
 propose accounts as usual and say in kontering.note that they are unchecked against the user's chart.
 TallyQueue does not include the BAS chart of accounts.
 
-An account can carry the codes the user's own chart gives it, as their bookkeeping program has them:
-vat_box, the box in the VAT return (momsruta) its amounts are reported in; ne_row, the row in the NE
-appendix (bokslut); sru, the SRU code. They say where an account's amounts end up, which helps to
-see what an account is for, such as which VAT box a reverse-charge account feeds. They are the
-user's data, not a rule: which accounts fit a document stays a proposal the user checks.
+Every account has three code fields, from the user's own chart as their bookkeeping program has
+them, and null where the user's list gives none for that account:
+- vat_box: the box in the VAT return (momsruta) its amounts are reported in. A letter A to I and two
+  digits, as bookkeeping programs write it (B10 is box 10, F48 box 48, D30 box 30), or two digits.
+- ne_row: the row in the NE appendix (bokslut): B, R or U and a number, such as B9, R6 or U2;
+  sometimes two, as "R6, R13" or "R4/R8".
+- sru: the SRU code, four digits, such as 7280.
+They say where an account's amounts end up, which helps to see what an account is for, such as
+which VAT box a reverse-charge account feeds. They are the user's data, not a rule: which accounts
+fit a document stays a proposal the user checks. codes counts how many accounts have each code: 0
+means the user's list has none of that kind, not that TallyQueue cannot keep them.
+
+The user keeps the list in the web page, under Accounts, by pasting it: one account per line, the
+number, the name and then any codes as a printed chart has them ("2611 Utgående moms 25 % B10 B14
+7381"); or five columns separated by semicolons, with an empty column for a code the account has
+not ("2611;Utgående moms 25 %;B10;B14;7381"); or a whole SIE file (its #KONTO and #SRU lines).
+Saving there replaces the whole list. When the user asks how to get their chart in, tell them this.
 
 accounts: only these account numbers, such as the ones in a kontering. Leave it out for the whole
 list.""",
@@ -485,14 +512,17 @@ async def list_accounts(
         list[str] | None, Field(description='Only these account numbers.', max_length=100)
     ] = None,
 ) -> list:
-    found = await _store(store.read_accounts, _user(ctx))
-    total = len(found)
+    every = await _store(store.read_accounts, _user(ctx))
+    out = {
+        'count': len(every),
+        'codes': {k: sum(1 for a in every if a.get(k)) for k in model.ACCOUNT_CODES},
+    }
+    found = every
     if accounts:
         wanted = {a.strip() for a in accounts}
-        found = [a for a in found if a['account'] in wanted]
-        missing = sorted(wanted - {a['account'] for a in found})
-        return [_text({'count': total, 'accounts': found, 'not_in_list': missing})]
-    return [_text({'count': total, 'accounts': found})]
+        found = [a for a in every if a['account'] in wanted]
+        out['not_in_list'] = sorted(wanted - {a['account'] for a in found})
+    return [_text(out | {'accounts': [_account_out(a) for a in found]})]
 
 
 @mcp.tool(
@@ -507,8 +537,10 @@ off again after an hour. While it is off this call is refused. Then tell the use
 switch it on unless adding accounts is what they asked for.
 
 It only adds. An account number that is already in the list keeps its name and codes and comes back
-under already_there; changing or removing accounts is done in the web page. Use the numbers and names the user
-gives you or points you to, such as the chart in their bookkeeping service.""",
+under already_there; changing or removing accounts is done in the web page. Use the numbers, names
+and codes the user gives you or points you to, such as the chart in their bookkeeping service: give
+vat_box, ne_row and sru as that chart has them (see list_accounts for their form), and leave out a
+code the chart does not give. Never work a code out yourself.""",
     annotations=_ADDS,
     structured_output=False,
 )
@@ -523,7 +555,15 @@ async def add_accounts(
         store.add_accounts, user, [a.model_dump(exclude_none=True) for a in accounts]
     )
     count = len(await _store(store.read_accounts, user))
-    return [_text({'added': added, 'already_there': already, 'count': count})]
+    return [
+        _text(
+            {
+                'added': [_account_out(a) for a in added],
+                'already_there': [_account_out(a) for a in already],
+                'count': count,
+            }
+        )
+    ]
 
 
 @mcp.tool(
