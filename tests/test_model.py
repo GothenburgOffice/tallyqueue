@@ -179,6 +179,10 @@ def test_accounts_given_one_by_one_are_checked():
     ]
     with pytest.raises(model.Invalid, match='not a NE row'):
         model.clean_accounts([{'account': '2614', 'name': 'x', 'ne_row': 'Z9'}])
+    # a VAT box takes the same shapes from a client as from a pasted line: A to I, or two digits
+    with pytest.raises(model.Invalid, match='"Z99" is not a VAT box'):
+        model.clean_accounts([{'account': '2614', 'name': 'x', 'vat_box': 'Z99'}])
+    assert model.clean_accounts([{'account': '2614', 'name': 'x', 'vat_box': '30'}])[0]['vat_box'] == '30'
 
 
 def test_a_skipped_item_is_no_twin_to_warn_about():
@@ -339,6 +343,8 @@ def test_accounts_keep_the_codes_a_printed_chart_has_after_the_name():
     assert model.parse_accounts('\n'.join(model.account_line(a) for a in parsed)) == parsed
     with pytest.raises(Invalid, match='Line 1: "X1" is not a VAT box'):
         model.parse_accounts('2640;Ingående moms;X1;B14;7381\n')
+    with pytest.raises(Invalid, match='"Z99" is not a VAT box'):
+        model.parse_accounts('2640;Ingående moms;Z99;B14;7381\n')
     with pytest.raises(Invalid, match='not a SRU code'):
         model.parse_accounts('2640;Ingående moms;F48;B14;73\n')
 

@@ -368,7 +368,7 @@ def _same_purchase(a: dict, b: dict) -> bool:
 # and only said back: TallyQueue draws no conclusion from them.
 ACCOUNT_CODES = ('vat_box', 'ne_row', 'sru')
 _CODE = {
-    'vat_box': re.compile(r'[A-Z]?\d{2}'),
+    'vat_box': re.compile(r'[A-I]?\d{2}'),
     'ne_row': re.compile(r'[BRU]\d{1,2}(?:(?:, ?|/)[BRU]\d{1,2})*'),
     'sru': re.compile(r'\d{4}'),
 }
