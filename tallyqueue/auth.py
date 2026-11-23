@@ -186,3 +186,73 @@ class Sessions:
         ]
         for key in dead:
             del self._sessions[key]
+
+
+# ---------------------------------------------------------------- upload tickets
+TICKET_PREFIX = 'tqu_'  # noqa: S105 (a prefix that marks a ticket, not a secret)
+TICKET_HEADER = 'x-upload-ticket'
+
+
+@dataclass
+class Ticket:
+    user: str
+    expires: float
+    sha256: str | None
+
+
+class UploadTickets:
+    """One-use permissions to upload one receipt file, for an AI client that cannot send the token.
+
+    A ticket is made by an MCP tool for the user whose token made that call, and is good for one
+    POST /upload within a few minutes: it is spent by the first attempt, also one that is
+    refused. When the client gave the file's SHA-256, only that file is taken. A ticket opens
+    nothing else. Kept in memory, only as its SHA-256: a restart drops them all.
+    """
+
+    def __init__(self, seconds: float = 600, per_user: int = 20):
+        self.seconds, self.per_user = seconds, per_user
+        self._tickets: dict[str, Ticket] = {}
+        self._lock = threading.Lock()
+
+    def create(self, user: str, sha256: str | None = None) -> tuple[str, float]:
+        """A new ticket and when it expires (Unix time). Refused when the user has too many open."""
+        if sha256 is not None and not _SHA256.fullmatch(sha256):
+            raise ValueError("sha256: expected the 64 hex digits of the file's SHA-256")
+        now = time.time()
+        ticket = TICKET_PREFIX + secrets.token_urlsafe(32)
+        with self._lock:
+            self._expire(now)
+            if sum(1 for t in self._tickets.values() if t.user == user) >= self.per_user:
+                raise ValueError(
+                    f'You have {self.per_user} unused upload tickets. Use them, or wait until they '
+                    f'expire ({int(self.seconds // 60)} minutes after each was made).'
+                )
+            expires = now + self.seconds
+            self._tickets[hash_token(ticket)] = Ticket(user, expires, sha256)
+        return ticket, expires
+
+    def spend(self, ticket: str) -> Ticket | None:
+        """Take the ticket out, so it can never be used again. None when it is unknown or expired."""
+        if not ticket.startswith(TICKET_PREFIX):
+            return None
+        now = time.time()
+        with self._lock:
+            self._expire(now)
+            found = self._tickets.pop(hash_token(ticket), None)
+        if found is None or found.user not in USERS:
+            return None
+        return found
+
+    def _expire(self, now: float) -> None:
+        for key in [k for k, t in self._tickets.items() if t.expires <= now]:
+            del self._tickets[key]
+
+
+def ticket_refused(ticket: str) -> str:
+    """Why an upload ticket was refused. It never repeats the ticket."""
+    if not ticket.startswith(TICKET_PREFIX):
+        return f'That is not an upload ticket: a ticket starts with {TICKET_PREFIX}.'
+    return (
+        'That upload ticket is used up or expired: each one is good for a single upload within '
+        'minutes of being made. Get a new one with the upload_ticket tool.'
+    )

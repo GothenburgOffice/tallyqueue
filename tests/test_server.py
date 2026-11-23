@@ -558,6 +558,88 @@ def test_upload_refuses_strangers_unknown_types_and_large_files():
     assert fetch('POST', '/upload', b'%PDF-1.4' + b'x' * 210 * 1024, {'X-API-Key': ALICE})[0] == 413
 
 
+def test_an_upload_ticket_adds_one_file_for_its_user_and_is_then_used_up():
+    data = pdf('Exempel Kontorsvaror AB, kvitto 7, 99.00 SEK (made up)')
+    reply = ok('upload_ticket', {'filename': "kvitto 7 (o'hara).pdf"})
+    ticket = reply['ticket']
+    assert (
+        ticket.startswith('tqu_') and reply['header'] == 'X-Upload-Ticket' and reply['only_this_file'] is None
+    )
+    # the command is ready to run, with the file name quoted for the shell
+    assert f'-H "X-Upload-Ticket: {ticket}"' in reply['command'] and reply['command'].endswith(
+        f'{BASE}/upload'
+    )
+    assert "@'kvitto 7 (o'\"'\"'hara).pdf'" in reply['command']
+
+    status, _, body = fetch(
+        'POST', '/upload', data, {'X-Upload-Ticket': ticket, 'X-Filename': 'kvitto-7.pdf'}
+    )
+    assert status == 201 and json.loads(body)['id'] == sha(data)
+    assert ok('get_item', {'id': sha(data)})['history'][0]['via'] == 'upload'
+    assert refused('get_item', {'id': sha(data)}, token=BOB)
+
+    # used once, it is gone, and the refusal never repeats it
+    status, _, body = fetch('POST', '/upload', pdf('another made-up file'), {'X-Upload-Ticket': ticket})
+    assert status == 401 and b'used up or expired' in body and ticket.encode() not in body
+    status, _, body = fetch('POST', '/upload', data, {'X-Upload-Ticket': 'tq_not-a-ticket'})
+    assert status == 401 and b'not an upload ticket' in body
+
+    # a ticket is BOB's when BOB's token made it
+    bobs = pdf('made-up receipt for bob')
+    ticket = ok('upload_ticket', token=BOB)['ticket']
+    assert fetch('POST', '/upload', bobs, {'X-Upload-Ticket': ticket})[0] == 201
+    assert ok('get_item', {'id': sha(bobs)}, token=BOB)['id'] == sha(bobs)
+    assert refused('get_item', {'id': sha(bobs)})
+
+
+def test_an_upload_ticket_for_one_file_takes_no_other():
+    data = pdf('Exempel Frakt AB, faktura 12, 150.00 SEK (made up)')
+    ticket = ok('upload_ticket', {'sha256': sha(data).upper()})['ticket']
+    status, _, body = fetch(
+        'POST', '/upload', pdf('not the file the ticket was for'), {'X-Upload-Ticket': ticket}
+    )
+    assert status == 403 and b'made for another file' in body
+    # a refused try uses the ticket up as well
+    assert fetch('POST', '/upload', data, {'X-Upload-Ticket': ticket})[0] == 401
+    ticket = ok('upload_ticket', {'sha256': sha(data)})['ticket']
+    assert fetch('POST', '/upload', data, {'X-Upload-Ticket': ticket})[0] == 201
+    assert 'sha256: expected the 64 hex digits' in refused('upload_ticket', {'sha256': 'abc'})
+
+
+def test_an_upload_ticket_opens_nothing_but_one_upload():
+    ticket = ok('upload_ticket')['ticket']
+    # not the MCP endpoint, in either header a token may come in
+    assert fetch('POST', '/mcp', b'{}', {'X-API-Key': ticket, 'Content-Type': 'application/json'})[0] == 401
+    assert fetch('POST', '/mcp', b'{}', {'Authorization': f'Bearer {ticket}'})[0] == 401
+    # not the token's place on /upload, and not the web page's sign-in
+    assert fetch('POST', '/upload', png(), {'X-API-Key': ticket})[0] == 401
+    status, _, body = Browser().sign_in(ticket)
+    assert status == 401 and b'does not start with tq_' in body
+    # it was never spent by any of that, and still works for its one upload
+    assert (
+        fetch('POST', '/upload', pdf('made-up file after the refusals'), {'X-Upload-Ticket': ticket})[0]
+        == 201
+    )
+
+
+def test_upload_tickets_expire_and_are_limited_per_user(monkeypatch):
+    monkeypatch.setattr(server.TICKETS, 'seconds', -1)
+    ticket = ok('upload_ticket')['ticket']
+    status, _, body = fetch(
+        'POST', '/upload', pdf('made-up file, ticket expired'), {'X-Upload-Ticket': ticket}
+    )
+    assert status == 401 and b'used up or expired' in body
+    monkeypatch.undo()
+
+    monkeypatch.setattr(server.TICKETS, 'per_user', 2)
+    first = ok('upload_ticket')['ticket']
+    ok('upload_ticket')
+    assert 'You have 2 unused upload tickets' in refused('upload_ticket')
+    assert ok('upload_ticket', token=BOB)['ticket']  # one user's tickets do not count for another
+    assert fetch('POST', '/upload', pdf('made-up file, frees a ticket'), {'X-Upload-Ticket': first})[0] == 201
+    assert ok('upload_ticket')['ticket']
+
+
 # ---------------------------------------------------------------- web page
 def test_pages_need_a_sign_in():
     for path in ('/items', f'/items/{sha(HOSTING)}', f'/receipts/{sha(HOSTING)}', '/accounts'):
@@ -882,6 +964,7 @@ def test_each_tool_says_whether_it_writes_so_a_client_can_ask_first():
         'list_accounts': True,
         'list_items': True,
         'update_item': False,
+        'upload_ticket': False,
     }
     # only the rate lookup reaches outside this server, and only update_item replaces what is stored
     assert [name for name, a in found.items() if a.open_world_hint] == ['get_riksbank_rate']
