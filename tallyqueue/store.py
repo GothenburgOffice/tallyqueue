@@ -291,6 +291,13 @@ def remove_file(user: str, ref: str, sha256: str, *, via: str) -> dict:
         if not file:
             raise NotFound('No such file in this item')
         item['files'] = [f for f in item['files'] if f is not file]
+        # Booked asks nothing of the files, but a booked item, like a prepped one, keeps at least
+        # one: what it was booked from stays with it.
+        if not item['files'] and item['status'] in ('prepped', 'booked'):
+            raise StoreError(
+                f'Cannot remove the last file of a {item["status"]} item: it keeps at least one. '
+                'Add the right file first, or set the status back to new.'
+            )
         problems = model.status_problems(item, item['status'])
         if problems:
             raise StoreError(f'Cannot remove it from a {item["status"]} item: {"; ".join(problems)}.')

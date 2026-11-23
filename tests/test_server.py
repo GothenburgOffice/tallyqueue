@@ -1104,7 +1104,12 @@ def test_the_item_page_shows_adds_and_removes_files(alice):
     }
     ok('update_item', changes)
     status, _, body = alice.post(f'{path}/remove-file', {'sha256': sha(receipt), 'confirm': 'on'})
-    assert status == 422 and b'No file documents the item yet' in body
+    assert status == 422 and b'Cannot remove the last file of a prepped item' in body
+    assert len(ok('get_item', {'id': item['id']})['files']) == 1
+    # booked asks nothing of the files, and still keeps its last one
+    ok('update_item', {'id': item['id'], 'status': 'booked', 'voucher': 'A 51'})
+    status, _, body = alice.post(f'{path}/remove-file', {'sha256': sha(receipt), 'confirm': 'on'})
+    assert status == 422 and b'Cannot remove the last file of a booked item' in body
     assert len(ok('get_item', {'id': item['id']})['files']) == 1
 
     # deleting the item deletes every file it has
