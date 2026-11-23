@@ -202,6 +202,7 @@ The single quotes store the placeholder, and `claude` fills it in from the envir
 | `list_accounts` | Your own list of accounts, if you have pasted one. Every account has its VAT box, NE row and SRU code (null where your list gives none), and the reply counts how many have each. Can be asked about some accounts only |
 | `add_accounts` | Adds accounts to your list. Refused unless you have switched it on in the web page, which lasts an hour |
 | `get_riksbank_rate` | Riksbanken's rate for a currency on a date. Stores nothing; the client gives the rate to `update_item` |
+| `upload_ticket` | A one-use ticket for uploading one file to `/upload`, for a client that can run `curl` but does not hold your token |
 
 The server's instructions and the tool descriptions tell the client the rules:
 
@@ -227,17 +228,25 @@ business, and add each one to TallyQueue with its facts and a proposed kontering
 The client has to send the file itself, and how depends on the client:
 
 - **A client with a shell**, such as Claude Code, saves the attachment and uploads the raw file.
-  The reply has the item's id, and `update_item` adds the facts.
+  Your token stays in the connector: the client asks `upload_ticket` for a one-use ticket and
+  runs the command it gets back. The reply has the item's id, and `update_item` adds the facts.
 
   ```bash
-  curl -fsS -X POST --data-binary @invoice.pdf -H "X-API-Key: $TALLYQUEUE_TOKEN" -H "X-Filename: invoice.pdf" https://tallyqueue.example.com/upload
+  curl -fsS -X POST --data-binary @invoice.pdf -H "X-Upload-Ticket: tqu_…" -H "X-Filename: invoice.pdf" https://tallyqueue.example.com/upload
   ```
+
+  A ticket is good for one upload within ten minutes, and is used up by the first try. When
+  the client gives the file's SHA-256 for the ticket, only that file is taken, so a ticket seen
+  by anyone else is of no use to them. It opens nothing else: not the list, not the web page.
+  Tickets are kept in memory and a restart drops them. A script of your own can still send the
+  token itself, as `X-API-Key`.
 
 - **A chat client without a shell** sends the file base64-encoded in `add_item`. That works for
   a short text receipt; for a PDF of ordinary size it is slow and can fail. Add those by hand in
-  the web page.
+  the web page, and let the client find them with `list_items`.
 
-This path, from a real mail connector to TallyQueue, has not been tested yet.
+The client must be able to reach your server: a sandbox that may only call some hosts cannot
+upload, and the web page is the way in from there.
 
 ## Your data
 

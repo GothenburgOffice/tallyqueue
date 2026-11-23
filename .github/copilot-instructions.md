@@ -85,11 +85,15 @@ or a pull request, and report only checks that actually ran.
   sent, a `${…}` placeholder not filled in, not a token, or a token no entry was made from),
   in the same words on `/mcp`, `/upload` and the sign-in page, and never repeats what was
   sent. There is no sign-in throttle, on purpose (a stranger could use it to lock the owner
-  out).
+  out). Upload tickets (`auth.UploadTickets`) are the one other credential: made by the
+  `upload_ticket` tool for the user whose token made the call, `tqu_` and 256 random bits, kept
+  in memory as SHA-256 only, good for a single `POST /upload` within minutes (spent by the
+  first try, also a refused one), bound to one file when the client gave its SHA-256, and
+  refused everywhere else.
 - `tallyqueue/config.py`: settings from the environment and the Host and Origin checks.
   `PUBLIC_URL` is the one source for links, the allowed host and origin, and the Secure cookie.
 - `tallyqueue/server.py`: the MCP tools (`add_item`, `list_items`, `get_item`, `update_item`,
-  `list_accounts`, `add_accounts`, `get_riksbank_rate`), `POST /upload`, `/health`, and `build_app()`, which
+  `list_accounts`, `add_accounts`, `get_riksbank_rate`, `upload_ticket`), `POST /upload`, `/health`, and `build_app()`, which
   wraps the app with the host check, the token check on `/mcp` and the default response headers.
 - `tallyqueue/riksbank.py`: Riksbanken's published rate for a currency on a date, fetched on
   request and remembered in memory.
@@ -152,7 +156,10 @@ or a pull request, and report only checks that actually ran.
   That includes HTML, XML and SVG: they are stored as text and never served as a page or an
   image. Don't add `image/svg+xml` or `text/html` to the served types.
 - **Form posts check the origin, then the session, then the CSRF token** (`web._post`).
-- **Tokens, session ids and receipt contents never reach the log.** A malformed
+- **An upload ticket opens one upload and nothing else.** Never accept one on `/mcp`, the
+  sign-in or any page, never make one last longer or serve more than one file, and never put it
+  in a URL: it goes in the `X-Upload-Ticket` header.
+- **Tokens, upload tickets, session ids and receipt contents never reach the log.** A malformed
   `TALLYQUEUE_USERS` entry is reported by position, not echoed.
 - **The production container stays locked down**: non-root, read-only root file system, no
   capabilities, the app port bound to 127.0.0.1 or not published.

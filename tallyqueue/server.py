@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import os
+import shlex
+import time
 from typing import Annotated, Literal
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import anyio
 from mcp.server.mcpserver import Context, MCPServer
@@ -33,9 +36,12 @@ INSTRUCTIONS = """TallyQueue is the user's to-do list of receipts and invoices t
 It is a helper, not a ledger: the user does the bookkeeping in their own bookkeeping service, and
 checks every figure first.
 
-- For each receipt or invoice you find (for example in the user's mail), add it once: add_item with
-  the file in file_base64, or POST the file to /upload and then update_item. An item's id is the
-  SHA-256 of its file, so adding the same file again changes nothing.
+- For each receipt or invoice you find (for example in the user's mail), add it once. A small text
+  receipt can go to add_item in file_base64. Any other file: save it, get a ticket with
+  upload_ticket, run the curl command it gives, then update_item with the id from the reply. When
+  you cannot run a command, ask the user to add the file in the web page and find it with
+  list_items. Never write out a PDF or an image as base64. An item's id is the SHA-256 of its
+  file, so adding the same file again changes nothing.
 - Two documents for one purchase, such as an invoice and its receipt: add both, so that both files
   are kept. Put the facts and the kontering on the one that shows the payment, and skip the other
   with a reason that names the first.
@@ -78,6 +84,11 @@ _CHANGES = ToolAnnotations(
     read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=False
 )
 _LOOKS_UP = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+# Makes a short-lived permission, and changes nothing in the user's list.
+_TICKET = ToolAnnotations(
+    read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False
+)
+TICKETS = auth.UploadTickets()
 
 # Amounts are text in the schema too, so a client is never invited to send a float.
 Amount = str | None
@@ -290,9 +301,10 @@ The file is required: {store.ACCEPTED}. Its SHA-256 is the item's id. If the sam
 list, nothing changes and the existing item comes back with created=false, so scanning an inbox twice
 is safe. To change an existing item, use update_item.
 
-Send the file base64-encoded in file_base64. For a file too large to send that way, upload the raw
-bytes instead and then call update_item with the id from the reply:
-  curl -fsS -X POST --data-binary @invoice.pdf -H "X-API-Key: <token>" -H "X-Filename: invoice.pdf" {config.PUBLIC_URL}/upload
+Send the file base64-encoded in file_base64 only when it is small, such as a short text receipt. A PDF
+or an image of any real size goes another way: when you can run curl where the file is, get a ticket
+with upload_ticket and run the command it gives, then call update_item with the id from the reply;
+when you cannot, ask the user to add the file in the web page and find it with list_items.
 
 facts: only what the document says (date, counterparty, amount, currency, VAT). Leave out what is not
 there; never guess. For another currency than SEK, also give exchange_rate or amount_sek, with
@@ -588,6 +600,64 @@ async def health(request: Request) -> Response:
     return JSONResponse({'status': 'ok', 'version': __version__})
 
 
+@mcp.tool(
+    description="""A one-use ticket to upload one receipt or invoice file to POST /upload, for when you have
+the file on disk and can run a command such as curl, but not the user's token.
+
+This is the way to add a file of any real size. add_item takes the file as base64 in the call, which
+suits only a small text receipt: never write out a PDF or an image as base64. When you can neither
+run curl nor send the file some other way, ask the user to add the file in the web page instead,
+then find it with list_items.
+
+The reply has the ticket and the command to run. The ticket is good for one upload within a few
+minutes: it is used up by the first try, also one that is refused, so take a new ticket for each
+file and for each new try. Give sha256, the SHA-256 of the file as 64 hex digits (sha256sum or
+shasum -a 256), when you can: then only that exact file is taken, so a ticket that is seen by
+anyone else is of no use to them. Keep the ticket out of anything you write for the user.
+
+The upload replies with the item's id; add the facts and a proposed kontering with update_item. The
+same file again adds nothing: it returns the item that is there.""",
+    annotations=_TICKET,
+    structured_output=False,
+)
+async def upload_ticket(
+    ctx: Context,
+    sha256: Annotated[
+        str | None,
+        Field(description='The SHA-256 of the file, 64 hex digits. Then only that file is taken.'),
+    ] = None,
+    filename: Annotated[
+        str | None,
+        Field(description="The file's name, for the command in the reply.", max_length=200),
+    ] = None,
+) -> list:
+    user = _user(ctx)
+    digest = sha256.strip().lower() if sha256 else None
+    try:
+        ticket, expires = TICKETS.create(user, digest)
+    except ValueError as e:
+        raise ToolError(str(e)) from None
+    name = (filename or '').strip() or 'receipt.pdf'
+    quoted = shlex.quote(name)
+    command = (
+        f'curl -fsS -X POST --data-binary @{quoted} '
+        f'-H "X-Upload-Ticket: {ticket}" -H "X-Filename: {quote(name)}" {config.PUBLIC_URL}/upload'
+    )
+    return [
+        _text(
+            {
+                'ticket': ticket,
+                'header': 'X-Upload-Ticket',
+                'url': f'{config.PUBLIC_URL}/upload',
+                'expires': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(expires)),
+                'only_this_file': digest,
+                'command': command,
+                'next': 'Run the command where the file is. The reply has the item id: then update_item.',
+            }
+        )
+    ]
+
+
 class TooLarge(Exception):
     pass
 
@@ -611,17 +681,39 @@ async def upload(request: Request) -> Response:
     """Add a receipt file as a new item: the raw bytes in the body, the token in X-API-Key.
 
     For clients that have the file on disk and a shell, where base64 in a tool call is clumsy.
+    Instead of the token, an upload ticket from the upload_ticket tool in X-Upload-Ticket: it is
+    spent by this request whatever comes of it, and takes only its own file when it names one.
     """
-    user = auth.user_for_headers(request.headers)
-    if not user:
-        why = auth.why_refused(auth.token_from_headers(request.headers))
-        return JSONResponse(
-            {'error': f'unauthorized: {why} Send your TallyQueue token as X-API-Key.'}, status_code=401
-        )
+    ticket = (request.headers.get(auth.TICKET_HEADER) or '').strip()
+    only = None
+    if ticket:
+        found = TICKETS.spend(ticket)
+        if not found:
+            return JSONResponse({'error': f'unauthorized: {auth.ticket_refused(ticket)}'}, status_code=401)
+        user, only = found.user, found.sha256
+    else:
+        user = auth.user_for_headers(request.headers)
+        if not user:
+            why = auth.why_refused(auth.token_from_headers(request.headers))
+            return JSONResponse(
+                {
+                    'error': f'unauthorized: {why} Send your TallyQueue token as X-API-Key, '
+                    'or an upload ticket from the upload_ticket tool as X-Upload-Ticket.'
+                },
+                status_code=401,
+            )
     try:
         data = await read_body(request, store.MAX_RECEIPT_BYTES)
     except TooLarge:
         return JSONResponse({'error': 'the file is too large'}, status_code=413)
+    if only and hashlib.sha256(data).hexdigest() != only:
+        return JSONResponse(
+            {
+                'error': 'This ticket was made for another file: the SHA-256 of what was sent is not '
+                'the one given for the ticket. The ticket is used up; get a new one for this file.'
+            },
+            status_code=403,
+        )
     filename = unquote(request.headers.get('x-filename', ''))
     try:
         item, created = await anyio.to_thread.run_sync(

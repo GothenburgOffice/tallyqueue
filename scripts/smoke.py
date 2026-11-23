@@ -138,6 +138,7 @@ async def main():
                 'list_accounts',
                 'list_items',
                 'update_item',
+                'upload_ticket',
             ],
             f'tools: {", ".join(tools)}',
         )
@@ -191,12 +192,15 @@ async def main():
         item = await call('update_item', id=hosting_id[:12], status='prepped')
         check(item['status'] == 'prepped', 'a complete item can be marked prepped')
 
-        status, _, body = request(
-            f'{base}/upload', SOFTWARE, {'X-API-Key': token, 'X-Filename': 'software-88213.pdf'}
-        )
+        # The way a client without the token uploads: a one-use ticket for this one file.
+        ticket = (await call('upload_ticket', sha256=software_id, filename='software-88213.pdf'))['ticket']
+        upload = {'X-Upload-Ticket': ticket, 'X-Filename': 'software-88213.pdf'}
+        status, _, body = request(f'{base}/upload', SOFTWARE, upload)
         check(
-            status in (200, 201) and json.loads(body)['id'] == software_id, 'POST /upload takes the raw file'
+            status in (200, 201) and json.loads(body)['id'] == software_id,
+            'POST /upload takes the raw file with an upload ticket',
         )
+        check(request(f'{base}/upload', SOFTWARE, upload)[0] == 401, 'the ticket is used up after one upload')
         item = await call(
             'update_item',
             id=software_id,
