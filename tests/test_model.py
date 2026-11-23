@@ -113,9 +113,34 @@ def item(**changes):
         'kontering': None,
         'booking': None,
         'skip_reason': None,
+        'files': [{'sha256': 'a' * 64, 'kind': 'document'}],
     }
     base['facts'] |= changes.pop('facts', {})
     return base | changes
+
+
+PAYMENT = {'sha256': 'f' * 64, 'kind': 'payment'}
+
+
+def test_an_item_is_prepped_only_with_a_file_that_documents_it():
+    facts = {'date': '2026-10-03', 'amount': '1250.00', 'currency': 'SEK'}
+    balanced = model.clean_kontering(kontering(('6230', '1250', None), ('1930', None, '1250')))
+    assert model.prep_problems(item(facts=facts, kontering=balanced, files=[])) == [
+        'No file documents the item yet: add the receipt or invoice'
+    ]
+    assert model.status_problems(item(facts=facts, kontering=balanced), 'prepped') == []
+
+
+def test_another_currency_without_a_payment_record_is_worth_a_second_look():
+    facts = {'date': '2026-10-19', 'amount': '20.00', 'currency': 'USD', 'amount_sek': '211.40'}
+    warned = model.warnings(item(facts=facts), [], [])
+    assert any('in USD, and no payment record is attached' in w for w in warned)
+    # the bank's record of what was drawn in SEK completes it; in SEK nothing is missing
+    assert model.warnings(item(facts=facts, files=[item()['files'][0], PAYMENT]), [], []) == []
+    assert model.warnings(item(facts=facts | {'currency': 'SEK', 'amount_sek': None}), [], []) == []
+    # a warning, never a condition: the item can still be prepped
+    balanced = model.clean_kontering(kontering(('6540', '211.40', None), ('1930', None, '211.40')))
+    assert model.prep_problems(item(facts=facts, kontering=balanced)) == []
 
 
 def test_prepped_needs_the_key_facts_and_a_balanced_kontering():
@@ -128,12 +153,10 @@ def test_prepped_needs_the_key_facts_and_a_balanced_kontering():
     assert model.prep_problems(item(facts=facts, kontering=balanced)) == []
 
 
-def test_booked_needs_a_voucher_number_and_the_receipt_attached():
-    assert len(model.status_problems(item(), 'booked')) == 2
-    assert (
-        len(model.status_problems(item(booking={'voucher': 'A 12', 'receipt_attached': False}), 'booked'))
-        == 1
-    )
+def test_booked_needs_a_voucher_number_and_nothing_about_where_the_files_are():
+    assert len(model.status_problems(item(), 'booked')) == 1
+    # some bookkeeping services keep no documents: the files are archived elsewhere, and the tick is a note
+    assert model.status_problems(item(booking={'voucher': 'A 12', 'receipt_attached': False}), 'booked') == []
     assert model.status_problems(item(booking={'voucher': 'A 12', 'receipt_attached': True}), 'booked') == []
     assert model.status_problems(item(), 'skipped') == ['Say why the item is skipped']
     assert model.status_problems(item(skip_reason='Private purchase'), 'skipped') == []
@@ -188,12 +211,13 @@ def test_accounts_given_one_by_one_are_checked():
 def test_a_skipped_item_is_no_twin_to_warn_about():
     # Two documents for one purchase: one is skipped, and the warning has done its work.
     facts = {'date': '2026-10-03', 'amount': '100.00', 'currency': 'EUR'}
-    kept = item(facts=facts)
+    documented = item()['files'] + [PAYMENT]
+    kept = item(facts=facts, files=documented)
     skipped = item(id='b' * 64, facts=facts, status='skipped', skip_reason='Same purchase as aaaaaaaaaaaa')
     assert model.warnings(kept, [], [kept, skipped]) == []
     assert model.warnings(skipped, [], [kept, skipped]) == []
     # a third document with the same figures that is not skipped is still pointed at
-    third = item(id='c' * 64, facts=facts)
+    third = item(id='c' * 64, facts=facts, files=documented)
     assert any(
         'cccccccccccc' in w and 'bbbb' not in w for w in model.warnings(kept, [], [kept, skipped, third])
     )

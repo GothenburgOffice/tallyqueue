@@ -198,6 +198,8 @@ class Ticket:
     user: str
     expires: float
     sha256: str | None
+    item: str | None = None  # the item the file is added to; None makes a new item
+    kind: str | None = None
 
 
 class UploadTickets:
@@ -214,7 +216,9 @@ class UploadTickets:
         self._tickets: dict[str, Ticket] = {}
         self._lock = threading.Lock()
 
-    def create(self, user: str, sha256: str | None = None) -> tuple[str, float]:
+    def create(
+        self, user: str, sha256: str | None = None, item: str | None = None, kind: str | None = None
+    ) -> tuple[str, float]:
         """A new ticket and when it expires (Unix time). Refused when the user has too many open."""
         if sha256 is not None and not _SHA256.fullmatch(sha256):
             raise ValueError("sha256: expected the 64 hex digits of the file's SHA-256")
@@ -228,7 +232,7 @@ class UploadTickets:
                     f'expire ({int(self.seconds // 60)} minutes after each was made).'
                 )
             expires = now + self.seconds
-            self._tickets[hash_token(ticket)] = Ticket(user, expires, sha256)
+            self._tickets[hash_token(ticket)] = Ticket(user, expires, sha256, item, kind)
         return ticket, expires
 
     def spend(self, ticket: str) -> Ticket | None:

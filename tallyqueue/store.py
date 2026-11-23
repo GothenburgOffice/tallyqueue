@@ -2,14 +2,17 @@
 # Copyright (C) 2026 Gothenburg Office
 """Items and receipts on disk. One folder per approved user; nothing is shared between users.
 
-    DATA_DIR/users/<user>/items/<sha256>.json      the item: facts, proposed kontering, status, history
-    DATA_DIR/users/<user>/receipts/<sha256>.<ext>  the receipt file as it arrived (a working copy)
+    DATA_DIR/users/<user>/items/<id>.json          the item: facts, proposed kontering, files, status, history
+    DATA_DIR/users/<user>/receipts/<sha256>.<ext>  each file of an item as it arrived (a working copy)
     DATA_DIR/users/<user>/accounts.json            the user's own list of accounts, if they gave one
     DATA_DIR/users/<user>/settings.json            what the user has switched on, such as accounts from a client
 
-An item's id is the SHA-256 of its receipt file, so the same file added twice is one item.
-The receipt kept here is a working copy. The archive that the law asks for is the one in the
-user's bookkeeping service.
+The item is the unit: one purchase or sale, with its facts and kontering, and the files that
+document it, such as a receipt in another currency and the bank's record of what was drawn in
+SEK. An item's id is 64 hexadecimal characters that never change: the SHA-256 of its first file
+when it was added with one, otherwise random. A file belongs to one item only, so the same file
+added twice changes nothing. The files kept here are working copies. The archive that the law
+asks for is the one in the user's bookkeeping service.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import threading
 
 from . import model
@@ -72,10 +76,18 @@ def _item_path(user: str, item_id: str) -> str:
     return _user_dir(user, 'items', f'{item_id}.json')
 
 
-def receipt_path(user: str, item: dict) -> str | None:
-    """Where the item's receipt file is, or None when it is gone."""
-    path = _user_dir(user, 'receipts', f'{item["id"]}.{item["receipt"]["ext"]}')
+def file_path(user: str, file: dict) -> str | None:
+    """Where one of an item's files is, or None when it is gone."""
+    path = _user_dir(user, 'receipts', f'{file["sha256"]}.{file["ext"]}')
     return path if os.path.isfile(path) else None
+
+
+def find_file(item: dict, sha256: str | None) -> dict | None:
+    """The item's file with this SHA-256, or its first file when sha256 is empty."""
+    files = item.get('files') or []
+    if not sha256:
+        return files[0] if files else None
+    return next((f for f in files if f['sha256'] == sha256), None)
 
 
 def _write(path: str, data: bytes) -> None:
@@ -99,9 +111,32 @@ def _read_json(path: str):
 
 
 def _read_item(path: str) -> dict:
-    """An item from disk with every fact present: one added in a later version reads as empty."""
+    """An item from disk with every fact present: one added in a later version reads as empty.
+
+    An item saved before items had several files kept its one file under "receipt", stored by
+    the item's id. It reads as an item with that one file, and is saved that way the next time.
+    """
     item = _read_json(path)
     item['facts'] = {name: item['facts'].get(name) for name in model.FACT_FIELDS}
+    if 'files' not in item:
+        old = item.pop('receipt', None)
+        first = (item.get('history') or [{}])[0]
+        item['files'] = (
+            [
+                {
+                    'sha256': item['id'],
+                    'filename': old['filename'],
+                    'ext': old['ext'],
+                    'media_type': old['media_type'],
+                    'bytes': old['bytes'],
+                    'kind': 'document',
+                    'added': item.get('created'),
+                    'via': first.get('via'),
+                }
+            ]
+            if old
+            else []
+        )
     return item
 
 
@@ -136,43 +171,69 @@ def _display_name(filename: str, ext: str) -> str:
     return name[:150] or f'receipt.{ext}'
 
 
+# ---------------------------------------------------------------- files
+def _new_file(data: bytes, filename: str, kind: str | None, via: str, stamp: str) -> dict:
+    """The record of a file, checked: not empty, not too large, an accepted type, a known kind."""
+    if not data:
+        raise StoreError('The file is empty')
+    if len(data) > MAX_RECEIPT_BYTES:
+        raise StoreError(f'The file is larger than {MAX_RECEIPT_BYTES // (1024 * 1024)} MB')
+    kind = kind or 'document'
+    if kind not in model.FILE_KINDS:
+        raise StoreError(f'kind: one of {", ".join(model.FILE_KINDS)}')
+    ext, media = sniff(data, filename or '')
+    return {
+        'sha256': hashlib.sha256(data).hexdigest(),
+        'filename': _display_name(filename or '', ext),
+        'ext': ext,
+        'media_type': media,
+        'bytes': len(data),
+        'kind': kind,
+        'added': stamp,
+        'via': via,
+    }
+
+
+def _holder(user: str, sha256: str) -> dict | None:
+    """The item that has a file with this SHA-256, if any. Call it under the lock."""
+    for item in all_items(user):
+        if find_file(item, sha256):
+            return item
+    return None
+
+
+def _save_file(user: str, file: dict, data: bytes) -> None:
+    _write(_user_dir(user, 'receipts', f'{file["sha256"]}.{file["ext"]}'), data)
+
+
 # ---------------------------------------------------------------- items
 def add_item(
     user: str,
-    data: bytes,
+    data: bytes | None,
     filename: str = '',
     *,
     via: str,
+    kind: str | None = None,
     source: str | None = None,
     facts: dict | None = None,
     kontering: dict | None = None,
     notes: str | None = None,
 ) -> tuple[dict, bool]:
-    """Store a receipt file as a new item. Returns (item, created).
+    """A new item, with its first file or none yet. Returns (item, created).
 
-    When the same file is already in the list, the existing item comes back unchanged and
-    created is False: a second scan of an inbox never overwrites what the user has edited.
+    When the file is already in the list, the item that has it comes back unchanged and created
+    is False: a second scan of an inbox never overwrites what the user has edited.
     """
-    if not data:
-        raise StoreError('The file is empty')
-    if len(data) > MAX_RECEIPT_BYTES:
-        raise StoreError(f'The file is larger than {MAX_RECEIPT_BYTES // (1024 * 1024)} MB')
-    ext, media = sniff(data, filename or '')
-    item_id = hashlib.sha256(data).hexdigest()
+    stamp = now()
+    file = _new_file(data, filename, kind, via, stamp) if data is not None else None
     cleaned = model.clean_facts(facts or {})
     settled = model.settle_sek({}, {name: cleaned.get(name) for name in model.FACT_FIELDS}, cleaned)
-    stamp = now()
     item = {
-        'id': item_id,
+        'id': file['sha256'] if file else secrets.token_hex(32),
         'status': 'new',
         'created': stamp,
         'updated': stamp,
-        'receipt': {
-            'filename': _display_name(filename or '', ext),
-            'ext': ext,
-            'media_type': media,
-            'bytes': len(data),
-        },
+        'files': [file] if file else [],
         'source': model.text(source, 'source', 300),
         'facts': settled,
         'kontering': model.clean_kontering(kontering),
@@ -182,12 +243,77 @@ def add_item(
         'history': [{'at': stamp, 'by': user, 'via': via, 'what': 'added'}],
     }
     with _lock:
-        path = _item_path(user, item_id)
-        if os.path.exists(path):
-            return _read_item(path), False
-        _write(_user_dir(user, 'receipts', f'{item_id}.{ext}'), data)
+        if file:
+            holder = _holder(user, file['sha256'])
+            if holder:
+                return holder, False
+        path = _item_path(user, item['id'])
+        if os.path.exists(path):  # an id that is taken: never in practice, and never overwritten
+            raise StoreError('Try again')
+        if file:
+            _save_file(user, file, data)
         _write_json(path, item)
     return item, True
+
+
+def add_file(
+    user: str, ref: str, data: bytes, filename: str = '', *, via: str, kind: str | None = None
+) -> tuple[dict, bool]:
+    """Add a file to an item. Returns (item, added).
+
+    The same file again on the same item changes nothing (added is False). A file that another
+    item already has is refused: a file documents one item.
+    """
+    stamp = now()
+    file = _new_file(data, filename, kind, via, stamp)
+    with _lock:
+        item = get_item(user, ref)
+        holder = _holder(user, file['sha256'])
+        if holder and holder['id'] == item['id']:
+            return item, False
+        if holder:
+            raise StoreError(
+                f'This file is already in another item, {holder["id"][:12]}. A file documents one item.'
+            )
+        if len(item['files']) >= model.MAX_FILES:
+            raise StoreError(f'An item has at most {model.MAX_FILES} files')
+        _save_file(user, file, data)
+        item['files'] = item['files'] + [file]
+        _log(user, item, via, f'file added: {file["filename"]} ({file["kind"]})')
+        return item, True
+
+
+def remove_file(user: str, ref: str, sha256: str, *, via: str) -> dict:
+    """Take a file off an item and delete it. A prepped or booked item keeps at least one file."""
+    with _lock:
+        item = get_item(user, ref)
+        file = find_file(item, (sha256 or '').strip().lower()) if sha256 else None
+        if not file:
+            raise NotFound('No such file in this item')
+        item['files'] = [f for f in item['files'] if f is not file]
+        # Booked asks nothing of the files, but a booked item, like a prepped one, keeps at least
+        # one: what it was booked from stays with it.
+        if not item['files'] and item['status'] in ('prepped', 'booked'):
+            raise StoreError(
+                f'Cannot remove the last file of a {item["status"]} item: it keeps at least one. '
+                'Add the right file first, or set the status back to new.'
+            )
+        problems = model.status_problems(item, item['status'])
+        if problems:
+            raise StoreError(f'Cannot remove it from a {item["status"]} item: {"; ".join(problems)}.')
+        path = file_path(user, file)
+        _log(user, item, via, f'file removed: {file["filename"]}')
+        if path:
+            os.remove(path)
+        return item
+
+
+def _log(user: str, item: dict, via: str, what: str) -> None:
+    """Save the item with one more line of history. Call it under the lock."""
+    item['updated'] = now()
+    entry = {'at': item['updated'], 'by': user, 'via': via, 'what': what}
+    item['history'] = (item['history'] + [entry])[-MAX_HISTORY:]
+    _write_json(_item_path(user, item['id']), item)
 
 
 def resolve(user: str, ref: str) -> str:
@@ -244,7 +370,7 @@ def _haystack(item: dict) -> str:
     facts = item['facts']
     parts = [
         item['id'],
-        item['receipt']['filename'],
+        *(f['filename'] for f in item['files']),
         item.get('source'),
         item.get('notes'),
         (item.get('booking') or {}).get('voucher'),
@@ -335,22 +461,19 @@ def update_item(
             what.append(f'status: {old_status} to {new_status}')
         if json.dumps(item, sort_keys=True) == before:
             return item
-        item['updated'] = now()
-        item['history'] = (
-            item['history'] + [{'at': item['updated'], 'by': user, 'via': via, 'what': '; '.join(what)}]
-        )[-MAX_HISTORY:]
-        _write_json(_item_path(user, item['id']), item)
+        _log(user, item, via, '; '.join(what))
         return item
 
 
 def delete_item(user: str, ref: str) -> None:
-    """Remove an item and its receipt file. The next scan of the inbox will add it again."""
+    """Remove an item and its files. The next scan of the inbox will add them again."""
     with _lock:
         item = get_item(user, ref)
-        receipt = receipt_path(user, item)
+        paths = [file_path(user, f) for f in item['files']]
         os.remove(_item_path(user, item['id']))
-        if receipt:
-            os.remove(receipt)
+        for path in paths:
+            if path:
+                os.remove(path)
 
 
 # ---------------------------------------------------------------- the user's accounts

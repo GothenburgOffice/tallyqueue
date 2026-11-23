@@ -75,8 +75,12 @@ or a pull request, and report only checks that actually ran.
 - `tallyqueue/model.py`: what an item holds and every check on it (amounts, dates, kontering
   lines, the conditions for each status, warnings, the pasted list of accounts). Pure functions,
   no files or network. Unit-test any change here (`tests/test_model.py`).
-- `tallyqueue/store.py`: items and receipts on disk, one folder per user. An item's id is the
-  SHA-256 of its receipt file; adding the same file again returns the existing item unchanged.
+- `tallyqueue/store.py`: items and their files on disk, one folder per user. The item is the unit
+  (one purchase or sale); its files (`files`, each with a `kind`: document, payment or other) are
+  stored by SHA-256, and a file belongs to one item only: adding it again returns the item that
+  has it, unchanged, and adding it to another item is refused. An item's id never changes: the
+  SHA-256 of its first file when it was added with one, otherwise random. An item saved with the
+  older single `receipt` reads as one with that one file (`_read_item`).
   Every function takes the user first and never reads another user's folder. Writes are whole
   files (temporary file, then rename) under one lock.
 - `tallyqueue/auth.py`: approved users (`TALLYQUEUE_USERS`, only SHA-256 of each token), web
@@ -92,7 +96,7 @@ or a pull request, and report only checks that actually ran.
   refused everywhere else.
 - `tallyqueue/config.py`: settings from the environment and the Host and Origin checks.
   `PUBLIC_URL` is the one source for links, the allowed host and origin, and the Secure cookie.
-- `tallyqueue/server.py`: the MCP tools (`add_item`, `list_items`, `get_item`, `update_item`,
+- `tallyqueue/server.py`: the MCP tools (`add_item`, `add_file`, `list_items`, `get_item`, `update_item`,
   `list_accounts`, `add_accounts`, `get_riksbank_rate`, `upload_ticket`), `POST /upload`, `/health`, and `build_app()`, which
   wraps the app with the host check, the token check on `/mcp` and the default response headers.
 - `tallyqueue/riksbank.py`: Riksbanken's published rate for a currency on a date, fetched on
@@ -108,8 +112,9 @@ or a pull request, and report only checks that actually ran.
   passes it to the store. Nothing trusts a user name sent by a client.
 - **Status conditions live in `model.status_problems`** and are enforced in
   `store.update_item`, for the MCP tools and the web page alike: prepped needs date, amount,
-  currency, the total in SEK when the currency is another, and a balanced kontering; booked
-  needs the voucher number and the receipt-attached tick; skipped needs a reason. A prepped or
+  currency, the total in SEK when the currency is another, a balanced kontering and at least one
+  file; booked needs the voucher number (the archived-files tick is optional: some bookkeeping
+  services keep no documents, and the user archives them elsewhere); skipped needs a reason. A prepped or
   booked item must stay that complete.
 - **Amounts are decimal strings with two decimals**, never floats: in the tool schema, in
   `model.money` and on disk. A JSON number is refused, and so is an amount that would have to
@@ -148,10 +153,14 @@ or a pull request, and report only checks that actually ran.
   renames or removes. Never make it part of adding receipts, and never widen it to replace the
   list. Each tool carries annotations that say whether it writes, so a client can ask the user
   first.
-- **A duplicate file never overwrites** what is stored.
+- **A duplicate file never overwrites** what is stored, and never moves to another item.
+- **An AI client adds files but never removes them**, and cannot delete items. Removing a file is
+  the user's, in the web page, and a prepped or booked item keeps at least one file
+  (`model.prep_problems`).
 - **No JavaScript on the pages.** The page policy is `default-src 'none'` with styles, images
   and frames from this origin only. Templates autoescape; never mark user text as safe.
-- **Receipts are served by content type from the file's bytes**, to their owner only. Anything
+- **Files are served by content type from the file's bytes**, under their own item
+  (`/items/<id>/files/<sha256>`), to their owner only. Anything
   that is not a PDF or a PNG, JPEG, WebP or GIF image goes out as `text/plain` in a sandbox.
   That includes HTML, XML and SVG: they are stored as text and never served as a page or an
   image. Don't add `image/svg+xml` or `text/html` to the served types.

@@ -56,7 +56,7 @@
   <label for="voucher-{{ key }}">Voucher number <span class="sub">(verifikationsnummer) in your bookkeeping service</span></label>
   <input id="voucher-{{ key }}" name="voucher" maxlength="50" class="short" required
          value="{{ (item.booking.voucher if item.booking else '') or '' }}" placeholder="A 12" autocomplete="off">
-  <label class="check"><input type="checkbox" name="receipt_attached" required> The receipt is attached to it there</label>
+  <label class="check"><input type="checkbox" name="receipt_attached"{% if item.booking and item.booking.receipt_attached %} checked{% endif %}> The files are archived <span class="sub">(in the bookkeeping service or a folder of your own)</span></label>
   <div><button>Mark as booked</button></div>
 </form>
 {% endmacro %}
