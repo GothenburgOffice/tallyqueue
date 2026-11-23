@@ -362,11 +362,37 @@ def _same_purchase(a: dict, b: dict) -> bool:
     return all(fa.get(k) and fa.get(k) == fb.get(k) for k in ('date', 'amount', 'currency'))
 
 
+# The codes a chart of accounts can carry beside a name, as the user's bookkeeping program has
+# them: the box in the VAT return (momsruta, "B10" or "05"), the row in the NE appendix (bokslut,
+# "B9", "R6, R13" or "R4/R8") and the SRU code ("7280"). They are the user's own, kept as given,
+# and only said back: TallyQueue draws no conclusion from them.
+ACCOUNT_CODES = ('vat_box', 'ne_row', 'sru')
+_CODE = {
+    'vat_box': re.compile(r'[A-I]?\d{2}'),
+    'ne_row': re.compile(r'[BRU]\d{1,2}(?:(?:, ?|/)[BRU]\d{1,2})*'),
+    'sru': re.compile(r'\d{4}'),
+}
+_CODE_NAMES = {'vat_box': 'VAT box', 'ne_row': 'NE row', 'sru': 'SRU code'}
+
+
+def _account(number: str, name, codes: dict, where: str) -> dict:
+    """One account, checked: its number, its name and the codes it has, each only when given."""
+    out = {'account': number, 'name': text(name or '', f'{where} name', 200) or ''}
+    for key in ACCOUNT_CODES:
+        value = _SPACES.sub(' ', str(codes.get(key) or '')).strip()
+        if not value:
+            continue
+        if not _CODE[key].fullmatch(value):
+            raise Invalid(f'{where}: "{value[:20]}" is not a {_CODE_NAMES[key]}')
+        out[key] = value
+    return out
+
+
 def clean_accounts(accounts) -> list[dict]:
-    """Accounts given one by one, as number and name, checked. Each number once."""
+    """Accounts given one by one, as number and name and any codes, checked. Each number once."""
     if not isinstance(accounts, list) or not accounts:
         raise Invalid('accounts: expected a list of accounts, each with its number and name')
-    out: dict[str, str] = {}
+    out: dict[str, dict] = {}
     for n, raw in enumerate(accounts, 1):
         if not isinstance(raw, dict):
             raise Invalid(f'Account {n}: expected account and name')
@@ -375,12 +401,32 @@ def clean_accounts(accounts) -> list[dict]:
             raise Invalid(f'Account {n}: the number is 4 to 6 digits, like "1930"')
         if number in out:
             raise Invalid(f'Account {n}: {number} is in the list twice')
-        out[number] = text(raw.get('name') or '', f'Account {n} name', 200) or ''
-    return [{'account': number, 'name': out[number]} for number in sorted(out)]
+        out[number] = _account(number, raw.get('name'), raw, f'Account {n}')
+    return [out[number] for number in sorted(out)]
 
 
 _ACCOUNT_LINE = re.compile(r'(\d{4,6})(?:[\s;,:=\-–]+(.*))?')
 _SIE_KONTO = re.compile(r'#KONTO\s+(\d{4,6})\s+(?:"((?:[^"\\]|\\.)*)"|(\S.*))')
+_SIE_SRU = re.compile(r'#SRU\s+(\d{4,6})\s+(\d{4})')
+# Codes at the end of a line, in the order a printed chart has them: VAT box, NE row, SRU code.
+# Only these shapes are taken as codes, so an ordinary name is left whole. An SRU code is read
+# here only when it starts with 7 or 8, as the NE appendix's do; in columns any 4 digits are one.
+# "B10" can be either a VAT box or an NE row: alone it is read as the NE row, which nearly every
+# account has, and as a VAT box only when an NE row follows it.
+_TRAILING_CODES = re.compile(
+    r'(?P<name>.*?)'
+    r'(?:\s+(?P<vat_box>[A-I]\d{2}(?=\s+[BRU]\d)|[AC-I]\d{2}))?'
+    r'(?:\s+(?P<ne_row>[BRU]\d{1,2}(?:(?:, ?|/)[BRU]\d{1,2})*))?'
+    r'(?:\s+(?P<sru>[78]\d{3}))?'
+)
+
+
+def _codes_at_end(rest: str) -> tuple[str, dict]:
+    """A name followed by codes, as a printed chart has them, split into the two."""
+    m = _TRAILING_CODES.fullmatch(rest)
+    if not m or not m.group('name').strip():
+        return rest, {}
+    return m.group('name'), {k: m.group(k) for k in ACCOUNT_CODES if m.group(k)}
 
 
 def parse_accounts(source: str) -> list[dict]:
@@ -388,9 +434,16 @@ def parse_accounts(source: str) -> list[dict]:
 
     One account per line: "1930 Företagskonto", "1930;Företagskonto", or a SIE line
     (#KONTO 1930 "Företagskonto"). Other lines that start with # are skipped, and so are the
-    braces around a voucher's rows, so a whole SIE file can be pasted.
+    braces around a voucher's rows, so a whole SIE file can be pasted. A SIE file's #SRU lines
+    give the accounts their SRU codes.
+
+    The codes can follow the name, as a printed chart has them: "1930 Företagskonto B9 7280"
+    (VAT box, NE row and SRU code, each when the account has one). For a line where that could be
+    read two ways, give five columns separated by semicolons or tabs:
+    "2611;Utgående moms 25 %;B10;B14;7381", with an empty column for a code the account has not.
     """
-    accounts: dict[str, str] = {}
+    accounts: dict[str, dict] = {}
+    sru: dict[str, tuple[int, str]] = {}
     for n, line in enumerate(source.splitlines(), 1):
         line = line.strip().lstrip('﻿')
         if not line or line in ('{', '}'):
@@ -399,12 +452,38 @@ def parse_accounts(source: str) -> list[dict]:
             m = _SIE_KONTO.fullmatch(line)
             if m:
                 name = m.group(2) if m.group(2) is not None else m.group(3)
-                accounts[m.group(1)] = text(name.replace('\\"', '"'), f'Line {n}', 200) or ''
+                old = accounts.get(m.group(1), {})
+                codes = {k: old[k] for k in ACCOUNT_CODES if k in old}
+                accounts[m.group(1)] = _account(m.group(1), name.replace('\\"', '"'), codes, f'Line {n}')
+            m = _SIE_SRU.fullmatch(line)
+            if m:
+                sru[m.group(1)] = (n, m.group(2))
             continue
-        m = _ACCOUNT_LINE.fullmatch(line)
-        if not m:
-            raise Invalid(f'Line {n}: expected an account number and its name, like "1930 Företagskonto"')
-        accounts[m.group(1)] = text(m.group(2) or '', f'Line {n}', 200) or ''
+        for sep in ('\t', ';'):
+            columns = [c.strip() for c in line.split(sep)]
+            if len(columns) >= 5 and re.fullmatch(r'\d{4,6}', columns[0]):
+                name = sep.join(columns[1:-3])
+                codes = dict(zip(ACCOUNT_CODES, columns[-3:], strict=True))
+                accounts[columns[0]] = _account(columns[0], name, codes, f'Line {n}')
+                break
+        else:
+            m = _ACCOUNT_LINE.fullmatch(line)
+            if not m:
+                raise Invalid(f'Line {n}: expected an account number and its name, like "1930 Företagskonto"')
+            name, codes = _codes_at_end(m.group(2) or '')
+            accounts[m.group(1)] = _account(m.group(1), name, codes, f'Line {n}')
+    for number, (n, code) in sru.items():
+        if number in accounts:
+            accounts[number] = _account(
+                number, accounts[number]['name'], accounts[number] | {'sru': code}, f'Line {n}'
+            )
     if len(accounts) > MAX_ACCOUNTS:
         raise Invalid(f'At most {MAX_ACCOUNTS} accounts')
-    return [{'account': number, 'name': accounts[number]} for number in sorted(accounts)]
+    return [accounts[number] for number in sorted(accounts)]
+
+
+def account_line(account: dict) -> str:
+    """An account written as one line that parse_accounts reads back the same."""
+    if any(account.get(k) for k in ACCOUNT_CODES):
+        return ';'.join([account['account'], account['name'], *(account.get(k, '') for k in ACCOUNT_CODES)])
+    return f'{account["account"]} {account["name"]}'.rstrip()

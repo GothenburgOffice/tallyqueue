@@ -155,8 +155,15 @@ under them a button fetches Riksbanken's rate for a date. You can also add a rec
 hand, and delete an item.
 
 Under **Accounts** you paste the accounts you use, one per line (`1930 Företagskonto`). A SIE
-file can be pasted as it is; only its `#KONTO` lines are read. TallyQueue then warns when a
-kontering uses an account that is not in your list, and the AI client can ask for the list.
+file can be pasted as it is; only its `#KONTO` and `#SRU` lines are read. TallyQueue then warns
+when a kontering uses an account that is not in your list, and the AI client can ask for the list.
+
+An account can also keep the codes your bookkeeping service gives it: the VAT box (momsruta), the
+NE row (bokslut) and the SRU code. Paste them after the name as a printed chart has them
+(`2611 Utgående moms 25 % B10 B14 7381`), or as five columns separated by semicolons
+(`2611;Utgående moms 25 %;B10;B14;7381`) where a line could be read two ways. The AI client gets
+them with the accounts, so it can see which VAT box an account feeds, for instance in a
+reverse-charge case. They are your data, kept as given: TallyQueue draws no conclusions from them.
 
 The AI client cannot change the list, unless you switch that on. On the same page, "Let the AI
 client add accounts for one hour" lets it add accounts when you ask it to, for example from the
@@ -190,9 +197,9 @@ The single quotes store the placeholder, and `claude` fills it in from the envir
 |---|---|
 | `add_item` | Adds a receipt or invoice file, with the facts read from it and a proposed kontering, as new or straight to prepped or skipped. The same file again changes nothing |
 | `list_items` | The list, by status (`todo` is new and prepped) or by text, with a count per status |
-| `get_item` | One item in full, with what is missing, warnings and its history |
+| `get_item` | One item in full, with what is missing, warnings and its history, and your entries for the accounts in its kontering |
 | `update_item` | Changes the facts, the proposed kontering, the status or the notes |
-| `list_accounts` | Your own list of accounts, if you have pasted one |
+| `list_accounts` | Your own list of accounts, if you have pasted one, with their VAT box, NE row and SRU code. Can be asked about some accounts only |
 | `add_accounts` | Adds accounts to your list. Refused unless you have switched it on in the web page, which lasts an hour |
 | `get_riksbank_rate` | Riksbanken's rate for a currency on a date. Stores nothing; the client gives the rate to `update_item` |
 

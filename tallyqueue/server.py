@@ -49,7 +49,8 @@ checks every figure first.
 - The kontering is a proposal for the user to check, in SEK, and it must balance. Propose one for
   every item, also when you are unsure: an empty kontering helps nobody, and what is open goes in
   its note. Treat alike documents alike. Use accounts from list_accounts when the user has
-  supplied their list.
+  supplied their list. Its accounts can carry the VAT box, NE row and SRU code from the user's own
+  chart: they show where an account's amounts are reported, for instance in a reverse-charge case.
 - The list of accounts is the user's own. Add to it with add_accounts only when the user asks you
   to add accounts, never while adding receipts. It works only while the user has switched it on
   in the web page.
@@ -163,6 +164,13 @@ class Account(BaseModel):
 
     account: str = Field(description='Account number, 4 digits (up to 6).')
     name: str = Field(description="Its name in the user's chart of accounts.", max_length=200)
+    vat_box: str | None = Field(
+        None, description="The box in the VAT return (momsruta) the user's chart gives it, such as B10 or 48."
+    )
+    ne_row: str | None = Field(
+        None, description="The row in the NE appendix (bokslut) the user's chart gives it, such as B9 or R6."
+    )
+    sru: str | None = Field(None, description="The SRU code the user's chart gives it, such as 7280.")
 
 
 def _user(ctx: Context) -> str:
@@ -211,7 +219,10 @@ def _row(item: dict) -> dict:
 
 def _view(user: str, item: dict, *, history: bool = False) -> dict:
     debit, credit = model.totals(item['kontering'])
-    has_lines = bool((item['kontering'] or {}).get('lines'))
+    lines = (item['kontering'] or {}).get('lines') or []
+    has_lines = bool(lines)
+    accounts = store.read_accounts(user)
+    used = {ln['account'] for ln in lines}
     out = {
         'id': item['id'],
         'status': item['status'],
@@ -230,7 +241,10 @@ def _view(user: str, item: dict, *, history: bool = False) -> dict:
         'created': item['created'],
         'updated': item['updated'],
         'missing_for_prepped': model.prep_problems(item) if item['status'] == 'new' else [],
-        'warnings': model.warnings(item, store.read_accounts(user), store.all_items(user)),
+        # The user's own entries for the accounts in the kontering, with their codes (VAT box, NE
+        # row, SRU code) when the user's chart has them.
+        'kontering_accounts': [a for a in accounts if a['account'] in used],
+        'warnings': model.warnings(item, accounts, store.all_items(user)),
         'web_page': f'{config.PUBLIC_URL}/items/{item["id"]}',
     }
     if history:
@@ -367,8 +381,9 @@ async def list_items(
 
 @mcp.tool(
     description="""One item in full: facts, proposed kontering with totals, status, booking details, what is
-missing before it can be prepped, warnings, and its history. id is the item's id or its first 8 or more
-characters. Read an item before changing it.""",
+missing before it can be prepped, warnings, and its history. kontering_accounts has the user's own
+entries for the accounts in the kontering, with their VAT box, NE row and SRU code when the user's chart
+has them. id is the item's id or its first 8 or more characters. Read an item before changing it.""",
     annotations=_READS,
     structured_output=False,
 )
@@ -439,13 +454,33 @@ async def update_item(
     description="""The user's own list of accounts (number and name), if they have supplied one in the web
 page. Use these account numbers in a kontering. An empty list means the user has not supplied any:
 propose accounts as usual and say in kontering.note that they are unchecked against the user's chart.
-TallyQueue does not include the BAS chart of accounts.""",
+TallyQueue does not include the BAS chart of accounts.
+
+An account can carry the codes the user's own chart gives it, as their bookkeeping program has them:
+vat_box, the box in the VAT return (momsruta) its amounts are reported in; ne_row, the row in the NE
+appendix (bokslut); sru, the SRU code. They say where an account's amounts end up, which helps to
+see what an account is for, such as which VAT box a reverse-charge account feeds. They are the
+user's data, not a rule: which accounts fit a document stays a proposal the user checks.
+
+accounts: only these account numbers, such as the ones in a kontering. Leave it out for the whole
+list.""",
     annotations=_READS,
     structured_output=False,
 )
-async def list_accounts(ctx: Context) -> list:
-    accounts = await _store(store.read_accounts, _user(ctx))
-    return [_text({'count': len(accounts), 'accounts': accounts})]
+async def list_accounts(
+    ctx: Context,
+    accounts: Annotated[
+        list[str] | None, Field(description='Only these account numbers.', max_length=100)
+    ] = None,
+) -> list:
+    found = await _store(store.read_accounts, _user(ctx))
+    total = len(found)
+    if accounts:
+        wanted = {a.strip() for a in accounts}
+        found = [a for a in found if a['account'] in wanted]
+        missing = sorted(wanted - {a['account'] for a in found})
+        return [_text({'count': total, 'accounts': found, 'not_in_list': missing})]
+    return [_text({'count': total, 'accounts': found})]
 
 
 @mcp.tool(
@@ -459,8 +494,8 @@ It works only while the user has switched it on in the web page, under Accounts,
 off again after an hour. While it is off this call is refused. Then tell the user so; do not ask them to
 switch it on unless adding accounts is what they asked for.
 
-It only adds. An account number that is already in the list keeps its name and comes back under
-already_there; changing or removing accounts is done in the web page. Use the numbers and names the user
+It only adds. An account number that is already in the list keeps its name and codes and comes back
+under already_there; changing or removing accounts is done in the web page. Use the numbers and names the user
 gives you or points you to, such as the chart in their bookkeeping service.""",
     annotations=_ADDS,
     structured_output=False,
@@ -472,7 +507,9 @@ async def add_accounts(
     ctx: Context,
 ) -> list:
     user = _user(ctx)
-    added, already = await _store(store.add_accounts, user, [a.model_dump() for a in accounts])
+    added, already = await _store(
+        store.add_accounts, user, [a.model_dump(exclude_none=True) for a in accounts]
+    )
     count = len(await _store(store.read_accounts, user))
     return [_text({'added': added, 'already_there': already, 'count': count})]
 
