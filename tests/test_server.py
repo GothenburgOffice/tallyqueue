@@ -1004,17 +1004,6 @@ def test_an_accounts_codes_reach_the_ai_client_and_survive_the_web_page(alice, h
     assert ok('list_accounts')['accounts'] == before
 
 
-async def _tools() -> dict:
-    """The tools as a client lists them, by name: what a client sees before it calls any."""
-    async with (
-        create_mcp_http_client(headers={'X-API-Key': ALICE}) as client,
-        streamable_http_client(f'{BASE}/mcp', http_client=client) as (read, write),
-        ClientSession(read, write) as session,
-    ):
-        await session.initialize()
-        return {tool.name: tool for tool in (await session.list_tools()).tools}
-
-
 # ---------------------------------------------------------------- several files per item
 USD = {'date': '2026-10-19', 'counterparty': 'Example Tools Inc', 'amount': '20.00', 'currency': 'USD'}
 
