@@ -872,12 +872,19 @@ def test_an_html_receipt_is_shown_as_text_never_as_a_page(alice):
 
 
 def test_the_users_own_accounts(alice, hosting):
-    assert ok('list_accounts') == {'count': 0, 'accounts': []}
+    assert ok('list_accounts') == {'count': 0, 'codes': {'vat_box': 0, 'ne_row': 0, 'sru': 0}, 'accounts': []}
     status, _, body = alice.post('/accounts', {'accounts': '1930 Bank\nnot an account line\n'})
     assert status == 422 and b'Line 2' in body and b'not an account line' in body
     source = '#KONTO 1930 "Företagskonto"\n2440 Leverantörsskulder\n2640 Ingående moms\n'
     assert alice.post('/accounts', {'accounts': source})[1]['location'] == '/accounts?msg=accounts'
-    assert ok('list_accounts')['accounts'][0] == {'account': '1930', 'name': 'Företagskonto'}
+    # every code field is there, null where the list gives none, so a client sees that they exist
+    assert ok('list_accounts')['accounts'][0] == {
+        'account': '1930',
+        'name': 'Företagskonto',
+        'vat_box': None,
+        'ne_row': None,
+        'sru': None,
+    }
     assert ok('list_accounts', token=BOB)['count'] == 0
     warnings = ok('get_item', {'id': hosting['id']})['warnings']
     assert 'Not in your list of accounts: 6230' in warnings
@@ -906,9 +913,10 @@ def test_an_ai_client_adds_accounts_only_while_the_user_has_switched_it_on(alice
     assert 'switched off' in refused('add_accounts', new, token=BOB)
 
     # it only adds: an account that is there keeps its name, and sending the same again adds nothing
+    none = {'vat_box': None, 'ne_row': None, 'sru': None}
     assert ok('add_accounts', new) == {
-        'added': [{'account': '7010', 'name': 'Exempelkonto A'}],
-        'already_there': [{'account': '1930', 'name': 'Företagskonto'}],
+        'added': [{'account': '7010', 'name': 'Exempelkonto A'} | none],
+        'already_there': [{'account': '1930', 'name': 'Företagskonto'} | none],
         'count': 4,
     }
     assert ok('add_accounts', new)['added'] == []
@@ -934,6 +942,17 @@ def test_an_ai_client_adds_accounts_only_while_the_user_has_switched_it_on(alice
     assert [a['account'] for a in ok('list_accounts')['accounts']] == ['1930', '2440', '2640', '7010', '7020']
 
 
+async def _tools() -> dict:
+    """The tools as a client lists them, by name: what a client sees before it calls any."""
+    async with (
+        create_mcp_http_client(headers={'X-API-Key': ALICE}) as client,
+        streamable_http_client(f'{BASE}/mcp', http_client=client) as (read, write),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        return {tool.name: tool for tool in (await session.list_tools()).tools}
+
+
 def test_an_accounts_codes_reach_the_ai_client_and_survive_the_web_page(alice, hosting):
     before = ok('list_accounts')['accounts']
     source = (
@@ -944,6 +963,7 @@ def test_an_accounts_codes_reach_the_ai_client_and_survive_the_web_page(alice, h
     # asked about some accounts, the client gets their codes, and hears which are not in the list
     assert ok('list_accounts', {'accounts': ['2640', '1111']}) == {
         'count': 3,
+        'codes': {'vat_box': 1, 'ne_row': 3, 'sru': 3},
         'accounts': [
             {'account': '2640', 'name': 'Ingående moms', 'vat_box': 'F48', 'ne_row': 'B14', 'sru': '7381'}
         ],
@@ -952,6 +972,22 @@ def test_an_accounts_codes_reach_the_ai_client_and_survive_the_web_page(alice, h
     # an item shows the user's entries for the accounts in its kontering
     used = ok('get_item', {'id': hosting['id']})['kontering_accounts']
     assert [a['account'] for a in used] == ['2440', '2640', '6230'] and used[1]['vat_box'] == 'F48'
+    assert used[0]['vat_box'] is None and used[2] == {
+        'account': '6230',
+        'name': 'Datakommunikation',
+        'vat_box': None,
+        'ne_row': 'R6',
+        'sru': '7501',
+    }
+
+    # the descriptions tell a client the form of each code and how the user gets the list in
+    tools = asyncio.run(_tools())
+    listing = tools['list_accounts'].description
+    assert 'null where' in listing and 'F48' in listing and '"R4/R8"' in listing
+    assert '2611;Utgående moms 25 %;B10;B14;7381' in listing and 'SIE' in listing
+    assert 'Never work a code out yourself' in tools['add_accounts'].description
+    schema = tools['add_accounts'].input_schema['$defs']['Account']['properties']
+    assert 'A to I' in schema['vat_box']['description'] and 'four digits' in schema['sru']['description']
 
     # the page shows the list so that saving it again keeps every code
     page = alice.get('/accounts')[2].decode()

@@ -205,7 +205,7 @@ The single quotes store the placeholder, and `claude` fills it in from the envir
 | `list_items` | The list, by status (`todo` is new and prepped) or by text, with a count per status |
 | `get_item` | One item in full, with what is missing, warnings and its history, and your entries for the accounts in its kontering |
 | `update_item` | Changes the facts, the proposed kontering, the status or the notes |
-| `list_accounts` | Your own list of accounts, if you have pasted one, with their VAT box, NE row and SRU code. Can be asked about some accounts only |
+| `list_accounts` | Your own list of accounts, if you have pasted one. Every account has its VAT box, NE row and SRU code (null where your list gives none), and the reply counts how many have each. Can be asked about some accounts only |
 | `add_accounts` | Adds accounts to your list. Refused unless you have switched it on in the web page, which lasts an hour |
 | `get_riksbank_rate` | Riksbanken's rate for a currency on a date. Stores nothing; the client gives the rate to `update_item` |
 | `upload_ticket` | A one-use ticket for uploading one file to `/upload`, as a new item or to an item you name, for a client that can run `curl` but does not hold your token |
